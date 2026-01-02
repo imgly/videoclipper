@@ -1,0 +1,82 @@
+{
+  "language_code": "eng",
+  "language_probability": 0.9776414036750793,
+  "text": "(laughs) We're diving deep into the world of prospecting FSBO leads. Are you ready? Let's go through a six-step guide to convert FSBO leads into listings. Happy prospecting.",
+  "words": [
+    { "text": "(laughs)", "start": 0.08, "end": 1.73, "type": "audio_event", "logprob": 0 },
+    { "text": " ", "start": 1.73, "end": 1.73, "type": "spacing", "logprob": 0 },
+    { "text": "We're", "start": 1.73, "end": 1.84, "type": "word", "logprob": 0 },
+    { "text": " ", "start": 1.84, "end": 1.88, "type": "spacing", "logprob": 0 },
+    { "text": "diving", "start": 1.88, "end": 2.22, "type": "word", "logprob": 0 },
+    { "text": " ", "start": 2.22, "end": 2.26, "type": "spacing", "logprob": 0 },
+    { "text": "deep", "start": 2.26, "end": 2.46, "type": "word", "logprob": 0 },
+    { "text": " ", "start": 2.46, "end": 2.52, "type": "spacing", "logprob": 0 },
+    { "text": "into", "start": 2.52, "end": 2.67, "type": "word", "logprob": 0 },
+    { "text": " ", "start": 2.67, "end": 2.67, "type": "spacing", "logprob": 0 },
+    { "text": "the", "start": 2.67, "end": 2.77, "type": "word", "logprob": 0 },
+    { "text": " ", "start": 2.77, "end": 2.8, "type": "spacing", "logprob": 0 },
+    { "text": "world", "start": 2.8, "end": 3.0, "type": "word", "logprob": 0 },
+    { "text": " ", "start": 3.0, "end": 3.06, "type": "spacing", "logprob": 0 },
+    { "text": "of", "start": 3.06, "end": 3.18, "type": "word", "logprob": 0 },
+    { "text": " ", "start": 3.18, "end": 3.2, "type": "spacing", "logprob": 0 },
+    { "text": "prospecting", "start": 3.2, "end": 3.8, "type": "word", "logprob": 0 },
+    { "text": " ", "start": 3.8, "end": 3.84, "type": "spacing", "logprob": 0 },
+    { "text": "FSBO", "start": 3.84, "end": 4.2, "type": "word", "logprob": 0 },
+    { "text": " ", "start": 4.2, "end": 4.24, "type": "spacing", "logprob": 0 },
+    { "text": "leads.", "start": 4.24, "end": 4.66, "type": "word", "logprob": 0 },
+    { "text": " ", "start": 4.66, "end": 4.7, "type": "spacing", "logprob": 0 },
+    { "text": "Are", "start": 4.7, "end": 4.8, "type": "word", "logprob": 0 },
+    { "text": " ", "start": 4.8, "end": 4.84, "type": "spacing", "logprob": 0 },
+    { "text": "you", "start": 4.84, "end": 4.92, "type": "word", "logprob": 0 },
+    { "text": " ", "start": 4.92, "end": 4.939, "type": "spacing", "logprob": 0 },
+    { "text": "ready?", "start": 4.94, "end": 6.02, "type": "word", "logprob": 0 },
+    { "text": " ", "start": 6.02, "end": 6.1, "type": "spacing", "logprob": 0 },
+    { "text": "Let's", "start": 6.1, "end": 6.26, "type": "word", "logprob": 0 },
+    { "text": " ", "start": 6.26, "end": 6.3, "type": "spacing", "logprob": 0 },
+    { "text": "go", "start": 6.3, "end": 6.42, "type": "word", "logprob": 0 },
+    { "text": " ", "start": 6.42, "end": 6.439, "type": "spacing", "logprob": 0 },
+    { "text": "through", "start": 6.44, "end": 6.54, "type": "word", "logprob": 0 },
+    { "text": " ", "start": 6.54, "end": 6.55, "type": "spacing", "logprob": 0 },
+    { "text": "a", "start": 6.55, "end": 6.72, "type": "word", "logprob": 0 },
+    { "text": " ", "start": 6.72, "end": 6.779, "type": "spacing", "logprob": 0 },
+    { "text": "six-step", "start": 6.78, "end": 7.4, "type": "word", "logprob": 0 },
+    { "text": " ", "start": 7.4, "end": 7.44, "type": "spacing", "logprob": 0 },
+    { "text": "guide", "start": 7.44, "end": 7.72, "type": "word", "logprob": 0 },
+    { "text": " ", "start": 7.72, "end": 7.76, "type": "spacing", "logprob": 0 },
+    { "text": "to", "start": 7.76, "end": 7.87, "type": "word", "logprob": 0 },
+    { "text": " ", "start": 7.87, "end": 7.88, "type": "spacing", "logprob": 0 },
+    { "text": "convert", "start": 7.88, "end": 8.18, "type": "word", "logprob": 0 },
+    { "text": " ", "start": 8.18, "end": 8.2, "type": "spacing", "logprob": 0 },
+    { "text": "FSBO", "start": 8.2, "end": 8.54, "type": "word", "logprob": 0 },
+    { "text": " ", "start": 8.54, "end": 8.6, "type": "spacing", "logprob": 0 },
+    { "text": "leads", "start": 8.6, "end": 8.86, "type": "word", "logprob": 0 },
+    { "text": " ", "start": 8.86, "end": 8.899, "type": "spacing", "logprob": 0 },
+    { "text": "into", "start": 8.9, "end": 9.11, "type": "word", "logprob": 0 },
+    { "text": " ", "start": 9.11, "end": 9.139, "type": "spacing", "logprob": 0 },
+    { "text": "listings.", "start": 9.14, "end": 10.24, "type": "word", "logprob": 0 },
+    { "text": "Happy", "start": 10.3, "end": 10.45, "type": "word", "logprob": 0 },
+    { "text": "prospecting.", "start": 10.45, "end": 10.9, "type": "word", "logprob": 0 }
+  ],
+  "segments": [
+    {
+      "text": "We're diving deep into the world of prospecting FSBO leads.",
+      "words": [
+        { "text": "We're", "start": 1.73, "end": 1.84 },
+        { "text": "diving", "start": 1.88, "end": 2.22 },
+        { "text": "deep", "start": 2.26, "end": 2.46 }
+      ]
+    },
+    {
+      "text": "We've got you covered. Happy prospecting.",
+      "words": [
+        { "text": "We've", "start": 30.44, "end": 30.55 },
+        { "text": "got", "start": 30.55, "end": 30.63 },
+        { "text": "you", "start": 30.63, "end": 30.74 },
+        { "text": "covered.", "start": 30.74, "end": 30.9 },
+        { "text": "Happy", "start": 31.2, "end": 31.35 },
+        { "text": "prospecting.", "start": 31.35, "end": 31.7 }
+      ]
+    }
+  ],
+  "transcription_id": "example-fixture"
+}

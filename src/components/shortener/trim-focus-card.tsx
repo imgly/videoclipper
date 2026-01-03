@@ -3,7 +3,10 @@ import type { ReactNode } from "react";
 import AspectRatioPicker from "@/components/shortener/aspect-ratio-picker";
 import { Button } from "@/components/ui/button";
 import { ASPECT_RATIO_OPTIONS } from "@/features/shortener/aspect-ratios";
-import type { RefinementMode } from "@/features/shortener/types";
+import type {
+  RefinementMode,
+  SpeechToTextProvider,
+} from "@/features/shortener/types";
 
 type TrimFocusCardProps = {
   refinementMode: RefinementMode;
@@ -14,6 +17,9 @@ type TrimFocusCardProps = {
   aspectRatioId?: string | null;
   onAspectRatioChange?: (ratioId: string) => void;
   showAspectRatio?: boolean;
+  speechProvider?: SpeechToTextProvider;
+  onSpeechProviderChange?: (provider: SpeechToTextProvider) => void;
+  showSpeechProvider?: boolean;
   preview?: ReactNode;
   previewFooter?: ReactNode;
   showOptions?: boolean;
@@ -43,6 +49,28 @@ const OPTIONS: {
   },
 ];
 
+const SPEECH_PROVIDER_OPTIONS: {
+  value: SpeechToTextProvider;
+  title: string;
+  description: string;
+}[] = [
+  {
+    value: "elevenlabs",
+    title: "ElevenLabs",
+    description: "Fast, word-level timestamps.",
+  },
+  {
+    value: "openai-whisper",
+    title: "OpenAI Whisper",
+    description: "whisper-1 with word timestamps.",
+  },
+  {
+    value: "openai-gpt4o",
+    title: "OpenAI GPT-4o",
+    description: "Higher quality with word-level timestamps.",
+  },
+];
+
 const TrimFocusCard = ({
   refinementMode,
   onRefinementModeChange,
@@ -52,6 +80,9 @@ const TrimFocusCard = ({
   aspectRatioId,
   onAspectRatioChange,
   showAspectRatio = false,
+  speechProvider,
+  onSpeechProviderChange,
+  showSpeechProvider = false,
   preview,
   previewFooter,
   showOptions = true,
@@ -63,7 +94,15 @@ const TrimFocusCard = ({
   const shouldShowAction = showAction;
   const shouldShowAspectRatio =
     showAspectRatio && Boolean(onAspectRatioChange) && Boolean(aspectRatioId);
-  const hasActions = shouldShowOptions || shouldShowAspectRatio || shouldShowAction;
+  const shouldShowSpeechProvider =
+    showSpeechProvider &&
+    Boolean(onSpeechProviderChange) &&
+    Boolean(speechProvider);
+  const hasActions =
+    shouldShowOptions ||
+    shouldShowAspectRatio ||
+    shouldShowSpeechProvider ||
+    shouldShowAction;
   const options = shouldShowOptions ? (
     <div className="space-y-2 text-left">
       <p className="text-sm font-medium text-foreground">Trim focus</p>
@@ -108,6 +147,38 @@ const TrimFocusCard = ({
     </div>
   ) : null;
 
+  const speechProviderOptions = shouldShowSpeechProvider ? (
+    <div className="space-y-2 text-left">
+      <p className="text-sm font-medium text-foreground">Speech to text</p>
+      <div className="grid gap-2 sm:grid-cols-2">
+        {SPEECH_PROVIDER_OPTIONS.map((option) => {
+          const isActive = speechProvider === option.value;
+          return (
+            <button
+              key={option.value}
+              type="button"
+              onClick={() => onSpeechProviderChange?.(option.value)}
+              className={`rounded-md border p-3 text-left transition ${
+                isActive
+                  ? "border-primary bg-primary/5"
+                  : "border-muted"
+              }`}
+              aria-pressed={isActive}
+              disabled={autoProcessing}
+            >
+              <div className="text-sm font-medium text-foreground">
+                {option.title}
+              </div>
+              <div className="mt-1 text-xs text-muted-foreground">
+                {option.description}
+              </div>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  ) : null;
+
   const action = shouldShowAction ? (
     <Button className="w-full" onClick={onStart} disabled={isStartDisabled}>
       {autoProcessing ? (
@@ -125,6 +196,7 @@ const TrimFocusCard = ({
     <div className="space-y-4">
       {options}
       {aspectRatioOptions}
+      {speechProviderOptions}
       {action}
     </div>
   ) : null;

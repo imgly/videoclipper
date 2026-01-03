@@ -36,6 +36,12 @@ NEXT_PUBLIC_ELEVENLABS_API_KEY=sk_live_...
 # Optional: override the transcription model (defaults to scribe_v1)
 NEXT_PUBLIC_ELEVENLABS_TRANSCRIPTION_MODEL=scribe_v1
 
+# Optional: OpenAI Whisper transcription (selectable in the UI)
+NEXT_PUBLIC_OPENAI_API_KEY=sk-...
+# Optional: override the OpenAI transcription model (defaults to whisper-1)
+NEXT_PUBLIC_OPENAI_TRANSCRIPTION_MODEL=whisper-1
+# The UI also includes an OpenAI GPT-4o Transcribe option with word-level timestamps.
+
 GEMINI_API_KEY=AIza...  # used by the Next.js API route when calling Google directly
 # Optional: choose which provider handles Gemini requests (google | openrouter).
 # If the server-side GEMINI_PROVIDER is omitted, the API route will fall back to NEXT_PUBLIC_GEMINI_PROVIDER.

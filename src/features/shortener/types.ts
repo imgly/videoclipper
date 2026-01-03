@@ -1,14 +1,19 @@
 import type {
   ElevenLabsTranscriptResponse,
+  OpenAITranscriptResponse,
   TranscriptWord,
 } from "@/lib/transcript";
 
 export type TranscriptionResult = {
   transcript: string;
-  rawResponse: ElevenLabsTranscriptResponse;
+  rawResponse: ElevenLabsTranscriptResponse | OpenAITranscriptResponse;
 };
 
 export type RefinementMode = "disfluency" | "thirty_seconds" | "sixty_seconds";
+export type SpeechToTextProvider =
+  | "elevenlabs"
+  | "openai-whisper"
+  | "openai-gpt4o";
 
 export type GeminiConceptRaw = {
   id?: string | null;

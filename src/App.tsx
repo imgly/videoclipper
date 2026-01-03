@@ -1,12 +1,18 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import { extractTranscriptWords } from "@/lib/transcript";
+import {
+  buildTranscriptWordsFromText,
+  extractOpenAITranscriptWords,
+  extractTranscriptWords,
+} from "@/lib/transcript";
 import type {
   ElevenLabsTranscriptResponse,
+  OpenAITranscriptResponse,
   TranscriptWord,
 } from "@/lib/transcript";
 import { transcribeWithElevenLabs } from "@/features/shortener/elevenLabs";
+import { transcribeWithOpenAI } from "@/features/shortener/openAi";
 import { requestGeminiRefinement } from "@/features/shortener/gemini";
 import { buildKeepRangesFromWords } from "@/features/shortener/keepRanges";
 import { useShortenerWorkflow } from "@/features/shortener/use-shortener-workflow";
@@ -15,6 +21,7 @@ import type {
   GeminiRefinement,
   ProcessingStepId,
   RangeMapping,
+  SpeechToTextProvider,
   TimeRange,
 } from "@/features/shortener/types";
 import type { CreativeEngineInstance } from "@/cesdk/engine";
@@ -49,6 +56,7 @@ const CAPTIONS_TRACK_TYPE = "captionTrack";
 const CAPTION_ENTRY_TYPE = "caption";
 const FACE_MODEL_URI = "/models";
 const FACE_THUMBNAIL_HEIGHT = 256;
+const FACE_THUMBNAIL_TIMEOUT_MS = 2500;
 const HOOK_DURATION_SECONDS = 5;
 const HOOK_MAX_WORDS = 18;
 const HOOK_MIN_WORDS = 6;
@@ -149,12 +157,16 @@ export default function App() {
   const [isFaceCropPending, setIsFaceCropPending] = useState(false);
   const [captionsEnabled, setCaptionsEnabled] = useState(true);
   const [textHookEnabled, setTextHookEnabled] = useState(true);
-  const [transcriptDebug, setTranscriptDebug] =
-    useState<ElevenLabsTranscriptResponse | null>(null);
+  const [transcriptDebug, setTranscriptDebug] = useState<
+    ElevenLabsTranscriptResponse | OpenAITranscriptResponse | null
+  >(null);
   const [geminiDebug, setGeminiDebug] = useState<string | null>(null);
   const [captionDebug, setCaptionDebug] = useState<
     Record<string, CaptionSegment[]> | null
   >(null);
+  const [speechProvider, setSpeechProvider] = useState<SpeechToTextProvider>(
+    "elevenlabs"
+  );
   const [isDebugOpen, setIsDebugOpen] = useState(false);
   const [currentTranscriptWords, setCurrentTranscriptWords] = useState<
     TranscriptWord[]
@@ -444,21 +456,49 @@ export default function App() {
   ) =>
     new Promise<ImageData>((resolve, reject) => {
       const safeTime = Number.isFinite(atSeconds) ? Math.max(0, atSeconds) : 0;
-      const cancel = engine.block.generateVideoThumbnailSequence(
-        blockId,
-        thumbH,
-        safeTime,
-        safeTime,
-        1,
-        (_index, result) => {
-          cancel?.();
-          if (result instanceof Error) {
-            reject(result);
-          } else {
-            resolve(result);
+      if (!engine.block.isValid(blockId)) {
+        reject(new Error("Block is not valid"));
+        return;
+      }
+      let settled = false;
+      let cancel: (() => void) | undefined;
+      const finalize = (fn: () => void) => {
+        if (settled) return;
+        settled = true;
+        if (timeoutId) window.clearTimeout(timeoutId);
+        fn();
+      };
+      const timeoutId = window.setTimeout(() => {
+        cancel?.();
+        finalize(() =>
+          reject(new Error("Timed out while sampling video frame."))
+        );
+      }, FACE_THUMBNAIL_TIMEOUT_MS);
+      try {
+        cancel = engine.block.generateVideoThumbnailSequence(
+          blockId,
+          thumbH,
+          safeTime,
+          safeTime,
+          1,
+          (_index, result) => {
+            cancel?.();
+            if (result instanceof Error) {
+              finalize(() => reject(result));
+            } else {
+              finalize(() => resolve(result));
+            }
           }
-        }
-      );
+        );
+      } catch (error) {
+        finalize(() =>
+          reject(
+            error instanceof Error
+              ? error
+              : new Error("Failed to sample video frame.")
+          )
+        );
+      }
     });
 
   const detectFaceCenterX = async (
@@ -544,6 +584,9 @@ export default function App() {
 
   const detectFaceForClip = useCallback(
     async (engine: CreativeEngineInstance, clipId: number) => {
+      if (!engine.block.isValid(clipId)) {
+        return null;
+      }
       const cached = faceCenterCacheRef.current.get(clipId);
       if (cached) {
         console.info("[FaceCrop] cache hit", { clipId, face: cached });
@@ -927,6 +970,51 @@ export default function App() {
   ): Promise<TranscriptWord[]> => {
     try {
       setIsTranscribing(true);
+      if (speechProvider === "openai-whisper") {
+        const transcriptionResult = await transcribeWithOpenAI(audioBlob, {
+          enableWordTimestamps: true,
+        });
+        setTranscriptDebug(transcriptionResult.rawResponse);
+        const words = extractOpenAITranscriptWords(
+          transcriptionResult.rawResponse
+        );
+        if (!words.length) {
+          throw new Error(
+            "OpenAI Whisper did not return word timestamps. Ensure whisper-1 with word timestamps is enabled."
+          );
+        }
+        setCurrentTranscriptWords(words);
+        setAnalysisEstimate(buildAnalysisEstimate(words));
+        return words;
+      }
+      if (speechProvider === "openai-gpt4o") {
+        const transcriptionResult = await transcribeWithOpenAI(audioBlob, {
+          model: "gpt-4o-transcribe",
+          enableWordTimestamps: true,
+        });
+        setTranscriptDebug(transcriptionResult.rawResponse);
+        let words = extractOpenAITranscriptWords(
+          transcriptionResult.rawResponse
+        );
+        if (!words.length) {
+          const durationHint = sourceVideoDuration || timelineDuration;
+          console.warn(
+            "OpenAI GPT-4o did not return word timestamps; using approximations."
+          );
+          words = buildTranscriptWordsFromText(
+            transcriptionResult.transcript,
+            durationHint
+          );
+        }
+        if (!words.length) {
+          throw new Error(
+            "OpenAI GPT-4o transcription did not return usable text."
+          );
+        }
+        setCurrentTranscriptWords(words);
+        setAnalysisEstimate(buildAnalysisEstimate(words));
+        return words;
+      }
       const transcriptionResult = await transcribeWithElevenLabs(audioBlob);
       setTranscriptDebug(transcriptionResult.rawResponse);
       const words = extractTranscriptWords(transcriptionResult.rawResponse);
@@ -2359,6 +2447,9 @@ export default function App() {
                       aspectRatioId={targetAspectRatioId}
                       onAspectRatioChange={handleAspectRatioChange}
                       showAspectRatio={showTrimStage}
+                      speechProvider={speechProvider}
+                      onSpeechProviderChange={setSpeechProvider}
+                      showSpeechProvider={showTrimStage}
                       showOptions={!showUploadStage}
                       showAction={!showUploadStage}
                       layout={showUploadStage ? "full" : "split"}

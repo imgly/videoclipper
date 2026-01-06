@@ -16,8 +16,12 @@ type TimelineScrubberProps = {
   className?: string;
 };
 
-const formatTime = (value: number) =>
-  Number.isFinite(value) ? value.toFixed(2) : "0.00";
+const formatTime = (value: number) => {
+  if (!Number.isFinite(value) || value <= 0) return "0:00.00";
+  const minutes = Math.floor(value / 60);
+  const seconds = (value % 60).toFixed(2).padStart(5, "0");
+  return `${minutes}:${seconds}`;
+};
 
 const clampPercent = (value: number) => Math.min(100, Math.max(0, value));
 
@@ -60,7 +64,7 @@ const TimelineScrubber = ({
           )}
         </button>
         <div className="text-xs text-muted-foreground">
-          {formatTime(timelinePosition)}s / {formatTime(timelineDuration)}s
+          {formatTime(timelinePosition)} / {formatTime(timelineDuration)}
         </div>
       </div>
 

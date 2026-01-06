@@ -4,6 +4,7 @@ export const PROCESSING_STEPS: { id: ProcessingStepId; label: string }[] = [
   { id: "audio", label: "Generating audio" },
   { id: "transcript", label: "Generating transcript" },
   { id: "analysis", label: "Analyzing transcript" },
+  { id: "preload", label: "Detecting faces" },
 ];
 
 export const createInitialProcessingState = (): Record<
@@ -13,4 +14,5 @@ export const createInitialProcessingState = (): Record<
   audio: "idle",
   transcript: "idle",
   analysis: "idle",
+  preload: "idle",
 });

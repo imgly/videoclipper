@@ -49,4 +49,6 @@ export const SHORTENING_MODE_INSTRUCTIONS = {
     "Target a finished runtime of 28-32 seconds. Besides removing disfluencies, aggressively remove whole sentences or tangents that are redundant, off-topic, or low-impact while preserving the overall narrative arc. Avoid finishing under ~26 seconds unless the source itself is shorter. If you undershoot, add back the next most relevant sentence to reach the target range.",
   sixty_seconds:
     "Target a finished runtime of 55-65 seconds. Besides removing disfluencies, aggressively remove whole sentences or tangents that are redundant, off-topic, or low-impact while preserving the overall narrative arc. Avoid finishing under ~50 seconds unless the source itself is shorter. If you undershoot, add back the next most relevant sentence to reach the target range.",
+  summary:
+    "Create a summary edit that captures all important talking points and the essence of the video. The runtime can be longer (often a few minutes) and should prioritize completeness over brevity. Remove disfluencies and low-value tangents while preserving a coherent narrative arc.",
 };

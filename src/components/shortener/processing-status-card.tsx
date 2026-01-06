@@ -5,6 +5,8 @@ import {
 import type {
   ProcessingStatus,
   ProcessingStepId,
+  SpeakerFaceThumbnail,
+  SpeakerSnippet,
 } from "@/features/shortener/types";
 
 type ProcessingStatusCardProps = {
@@ -16,6 +18,20 @@ type ProcessingStatusCardProps = {
     minSeconds: number;
     maxSeconds: number;
     wordCount: number;
+  } | null;
+  preloadSnippets?: SpeakerSnippet[];
+  preloadThumbnails?: SpeakerFaceThumbnail[];
+  hidePreloadDetails?: boolean;
+  speakerQuestion?: {
+    speaker: SpeakerSnippet;
+    index: number;
+    total: number;
+    isPlaying: boolean;
+    hasPlayed: boolean;
+    canPlay: boolean;
+    faceOptions: SpeakerFaceThumbnail[];
+    onPlay: () => void;
+    onSelect: (face: SpeakerFaceThumbnail) => void;
   } | null;
 };
 
@@ -56,14 +72,44 @@ const formatAnalysisEstimate = (
   };
 };
 
+const formatTimestamp = (value: number) => {
+  if (!Number.isFinite(value) || value <= 0) return "0:00";
+  const totalSeconds = Math.floor(value);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+};
+
+const formatTimeRange = (start: number, end: number) =>
+  `${formatTimestamp(start)} - ${formatTimestamp(end)}`;
+
 const describeProcessingStatus = (
   status: ProcessingStatus,
   stepId: ProcessingStepId,
   progress: number,
-  analysisStage?: string | null
+  analysisStage?: string | null,
+  preloadMeta?: { faces: number; speakers: number; awaitingChoice?: boolean }
 ) => {
   if (status === "active" && stepId === "audio" && progress > 0) {
     return `Extracting... ${progress}%`;
+  }
+  if (stepId === "preload") {
+    if (status === "error") {
+      return "Needs attention";
+    }
+    if (status === "complete") {
+      return preloadMeta?.faces
+        ? `Faces ready · ${preloadMeta.faces}`
+        : "Done";
+    }
+    if (status === "active") {
+      if (preloadMeta?.awaitingChoice) {
+        return "Choose speakers";
+      }
+      return preloadMeta?.speakers
+        ? `Detecting faces · ${preloadMeta.speakers} speakers`
+        : "Detecting faces";
+    }
   }
   if (stepId === "analysis") {
     if (status === "complete") {
@@ -106,6 +152,10 @@ const ProcessingStatusCard = ({
   autoProcessingError,
   analysisStage,
   analysisEstimate,
+  preloadSnippets,
+  preloadThumbnails,
+  hidePreloadDetails,
+  speakerQuestion,
 }: ProcessingStatusCardProps) => (
   <div className="rounded-xl border bg-card p-4">
     <div className="flex flex-col gap-1 text-sm font-medium sm:flex-row sm:items-center sm:justify-between">
@@ -121,33 +171,159 @@ const ProcessingStatusCard = ({
           step.id === "analysis"
             ? formatAnalysisEstimate(analysisEstimate)
             : null;
+        const preloadFaces = preloadThumbnails ?? [];
+        const preloadMeta = {
+          faces: preloadFaces.length,
+          speakers: preloadSnippets?.length ?? 0,
+          awaitingChoice: Boolean(speakerQuestion),
+        };
         return (
           <div
             key={step.id}
-            className="flex items-center justify-between rounded-md border border-dashed px-3 py-2"
+            className="rounded-md border border-dashed px-3 py-2"
           >
-            <div className="flex items-center gap-3">
-              {renderProcessingStatusIcon(status)}
-              <div>
-                <p className="text-sm font-medium text-foreground">{step.label}</p>
-                <p className="text-xs text-muted-foreground">
-                  {describeProcessingStatus(
-                    status,
-                    step.id,
-                    progress,
-                    analysisStage
-                  )}
-                </p>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                {renderProcessingStatusIcon(status)}
+                <div>
+                  <p className="text-sm font-medium text-foreground">{step.label}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {describeProcessingStatus(
+                      status,
+                      step.id,
+                      progress,
+                      analysisStage,
+                      preloadMeta
+                    )}
+                  </p>
+                </div>
               </div>
+              {status === "error" ? (
+                <span className="text-xs text-destructive">Retry</span>
+              ) : step.id === "analysis" &&
+                analysisMeta &&
+                status !== "complete" ? (
+                <div className="text-right text-xs text-muted-foreground">
+                  <div>Est. {analysisMeta.range}</div>
+                  <div>{analysisMeta.wordCount.toLocaleString()} words</div>
+                </div>
+              ) : null}
             </div>
-            {status === "error" ? (
-              <span className="text-xs text-destructive">Retry</span>
-            ) : step.id === "analysis" &&
-              analysisMeta &&
-              status !== "complete" ? (
-              <div className="text-right text-xs text-muted-foreground">
-                <div>Est. {analysisMeta.range}</div>
-                <div>{analysisMeta.wordCount.toLocaleString()} words</div>
+            {step.id === "preload" ? (
+              <div className="mt-3 w-full border-t border-dashed pt-3">
+                {speakerQuestion ? (
+                  <div
+                    key={speakerQuestion.speaker.id}
+                    className="animate-in rounded-md border bg-muted/20 p-3 fade-in-0 duration-300 slide-in-from-bottom-2"
+                  >
+                    <div className="flex items-center justify-between text-xs text-muted-foreground">
+                      <span>
+                        Speaker {speakerQuestion.index} of {speakerQuestion.total}
+                      </span>
+                      <span>
+                        {formatTimeRange(
+                          speakerQuestion.speaker.start,
+                          speakerQuestion.speaker.end
+                        )}
+                      </span>
+                    </div>
+                    <p className="mt-2 text-sm font-medium text-foreground">
+                      Who is {speakerQuestion.speaker.label}?
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      Listen to the clip, then choose the matching face.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={speakerQuestion.onPlay}
+                      disabled={!speakerQuestion.canPlay}
+                      className={`mt-3 inline-flex items-center justify-center rounded-md border px-3 py-1.5 text-xs font-medium transition hover:bg-muted disabled:opacity-50 ${
+                        !speakerQuestion.isPlaying && speakerQuestion.canPlay
+                          ? "animate-pulse border-primary/70 shadow-[0_0_14px_rgba(59,130,246,0.45)]"
+                          : speakerQuestion.isPlaying
+                            ? "border-primary/70"
+                            : ""
+                      }`}
+                    >
+                      {speakerQuestion.isPlaying ? "Playing..." : "Play speaker"}
+                    </button>
+                    {speakerQuestion.hasPlayed && (
+                      <>
+                        {speakerQuestion.faceOptions.length ? (
+                          <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
+                            {speakerQuestion.faceOptions.map((thumb) => (
+                              <button
+                                key={thumb.id}
+                                type="button"
+                                onClick={() => speakerQuestion.onSelect(thumb)}
+                                className="overflow-hidden rounded-full border bg-background transition hover:border-primary"
+                              >
+                                <div className="aspect-square w-full min-h-28">
+                                  <img
+                                    src={thumb.src}
+                                    alt="Face option"
+                                    className="h-full w-full object-cover"
+                                    loading="lazy"
+                                  />
+                                </div>
+                              </button>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="mt-3 rounded-md border border-dashed bg-background/60 p-3 text-xs text-muted-foreground">
+                            No face options available.
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                ) : preloadSnippets?.length && !hidePreloadDetails ? (
+                  <div className="space-y-3">
+                    {preloadSnippets.map((snippet) => {
+                      const faces = preloadFaces.filter(
+                        (thumb) => thumb.speakerId === snippet.id
+                      );
+                      return (
+                        <div
+                          key={snippet.id}
+                          className="rounded-md border bg-muted/20 p-2"
+                        >
+                          <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+                            <span className="font-medium text-foreground">
+                              {snippet.label}
+                            </span>
+                            <span>{formatTimeRange(snippet.start, snippet.end)}</span>
+                          </div>
+                          <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3">
+                            {faces.length ? (
+                              faces.map((thumb, index) => (
+                                <div
+                                  key={thumb.id}
+                                  className="overflow-hidden rounded-full border bg-background"
+                                >
+                                  <div className="aspect-square w-full min-h-28">
+                                    <img
+                                      src={thumb.src}
+                                      alt={`${snippet.label} face ${index + 1}`}
+                                      className="h-full w-full object-cover"
+                                      loading="lazy"
+                                    />
+                                  </div>
+                                </div>
+                              ))
+                            ) : (
+                              <div className="flex aspect-square w-full min-h-28 items-center justify-center rounded-md border border-dashed bg-background/60 text-[11px] text-muted-foreground">
+                                {status === "active"
+                                  ? "Detecting faces..."
+                                  : "No faces detected"}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : null}
               </div>
             ) : null}
           </div>

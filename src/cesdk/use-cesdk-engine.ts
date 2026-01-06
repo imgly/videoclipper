@@ -38,6 +38,9 @@ export const useCesdkEngine = (options: UseCesdkEngineOptions = {}) => {
           license: CESDK_LICENSE_KEY,
           baseURL: ENGINE_ASSET_BASE_URL,
           userId: "video-clipper",
+          featureFlags: {
+            optimizedLocalUploads: true,
+          },
         });
         try {
           await engine.addDefaultAssetSources({

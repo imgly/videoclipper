@@ -68,8 +68,12 @@ const PreviewCanvas = ({
     Boolean(videoFile) && showPlaybackControls && Boolean(onTogglePlayback);
   const isPlaybackDisabled = !isEngineReady || !timelineDuration;
   const shouldShowPreview = Boolean(videoFile) && !isFaceCropPending;
-  const formatTime = (value: number) =>
-    Number.isFinite(value) ? value.toFixed(2) : "0.00";
+  const formatTime = (value: number) => {
+    if (!Number.isFinite(value) || value <= 0) return "0:00.00";
+    const minutes = Math.floor(value / 60);
+    const seconds = (value % 60).toFixed(2).padStart(5, "0");
+    return `${minutes}:${seconds}`;
+  };
 
   return (
     <div
@@ -124,7 +128,7 @@ const PreviewCanvas = ({
             )}
           </button>
           <div className="absolute bottom-3 right-3 z-10 rounded-md border border-white/20 bg-black/60 px-2 py-1 text-xs font-medium text-white opacity-0 transition group-hover:opacity-100 group-focus-within:opacity-100">
-            {formatTime(timelineDuration)}s
+            {formatTime(timelineDuration)}
           </div>
         </>
       )}

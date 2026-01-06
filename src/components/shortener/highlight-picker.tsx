@@ -1,5 +1,5 @@
 import { Loader2 } from "lucide-react";
-import type { GeminiConceptChoice } from "@/features/shortener/types";
+import type { GeminiConceptChoice, SpeakerPreview } from "@/features/shortener/types";
 
 type HighlightPickerProps = {
   conceptChoices: GeminiConceptChoice[];
@@ -9,6 +9,7 @@ type HighlightPickerProps = {
   onSelect: (conceptId: string) => void;
   onShortenAnother?: () => void;
   shortenAnotherLabel?: string;
+  speakerPreviews?: Record<string, SpeakerPreview[]>;
 };
 
 const HighlightPicker = ({
@@ -19,14 +20,16 @@ const HighlightPicker = ({
   onSelect,
   onShortenAnother,
   shortenAnotherLabel = "Shorten another video",
+  speakerPreviews,
 }: HighlightPickerProps) => (
   <div className="rounded-xl border bg-card p-4">
-    {isApplyingConcept && (
-      <div className="flex justify-end">
+    <div className="flex items-center justify-between">
+      <p className="text-sm font-medium text-foreground">Results</p>
+      {isApplyingConcept && (
         <Loader2 className="h-4 w-4 animate-spin text-primary" />
-      </div>
-    )}
-    <div className={isApplyingConcept ? "mt-3 space-y-3" : "space-y-3"}>
+      )}
+    </div>
+    <div className="mt-3 space-y-3">
       {conceptChoices.map((concept) => {
         const isActive = selectedConceptId === concept.id;
         const isBusy =
@@ -36,6 +39,7 @@ const HighlightPicker = ({
           Number.isFinite(concept.estimated_duration_seconds)
             ? `≈ ${Math.round(concept.estimated_duration_seconds)}s`
             : null;
+        const speakers = speakerPreviews?.[concept.id] ?? [];
         return (
           <button
             key={concept.id}
@@ -50,11 +54,11 @@ const HighlightPicker = ({
           >
             <div className="flex items-start justify-between gap-3">
               <div>
-                <p className="text-sm font-semibold text-foreground">
+                <p className="text-lg font-semibold text-foreground">
                   {concept.title}
                 </p>
                 {concept.description && (
-                  <p className="mt-1 text-xs text-muted-foreground">
+                  <p className="mt-1 text-sm text-muted-foreground">
                     {concept.description}
                   </p>
                 )}
@@ -67,10 +71,49 @@ const HighlightPicker = ({
                 </span>
               ) : null}
             </div>
-            <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+            <div className="mt-3 flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
               {durationLabel && <span>{durationLabel}</span>}
-              {concept.notes && <span>{concept.notes}</span>}
             </div>
+            {speakers.length ? (
+              <div className="mt-3 border-t pt-3">
+                <div className="mt-2 grid gap-3 sm:grid-cols-3">
+                  {speakers.map((speaker) => {
+                    const thumbnails = speaker.thumbnails.slice(0, 3);
+                    return (
+                      <div
+                        key={speaker.id}
+                        className="flex items-center gap-2"
+                      >
+                        <div className="flex -space-x-2">
+                          {thumbnails.length ? (
+                            thumbnails.map((thumb) => (
+                              <div
+                                key={thumb.id}
+                                className="h-9 w-9 overflow-hidden rounded-full border bg-background"
+                              >
+                                <img
+                                  src={thumb.src}
+                                  alt={`${speaker.label} face`}
+                                  className="h-full w-full object-cover"
+                                  loading="lazy"
+                                />
+                              </div>
+                            ))
+                          ) : (
+                            <div className="flex h-9 w-9 items-center justify-center rounded-full border border-dashed text-[10px] text-muted-foreground">
+                              No face
+                            </div>
+                          )}
+                        </div>
+                        <span className="text-xs font-medium text-foreground">
+                          {speaker.label}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : null}
           </button>
         );
       })}

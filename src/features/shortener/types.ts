@@ -9,7 +9,23 @@ export type TranscriptionResult = {
   rawResponse: ElevenLabsTranscriptResponse | OpenAITranscriptResponse;
 };
 
-export type RefinementMode = "disfluency" | "thirty_seconds" | "sixty_seconds";
+export type RefinementMode =
+  | "disfluency"
+  | "thirty_seconds"
+  | "sixty_seconds"
+  | "summary";
+export type SpeakerTemplateId =
+  | "none"
+  | "stacked"
+  | "sidecar"
+  | "overlay"
+  | "solo"
+  | "multi";
+export type SpeakerTemplateOption = {
+  id: SpeakerTemplateId;
+  label: string;
+  description?: string | null;
+};
 export type SpeechToTextProvider =
   | "elevenlabs"
   | "openai-whisper"
@@ -73,11 +89,44 @@ export type RangeMapping = {
   timelineStart: number;
 };
 
-export type ProcessingStepId = "audio" | "transcript" | "analysis";
+export type ProcessingStepId = "audio" | "transcript" | "analysis" | "preload";
 export type ProcessingStatus = "idle" | "active" | "complete" | "error";
 
 export type CaptionSegment = {
   text: string;
   start: number;
   duration: number;
+};
+
+export type SpeakerSnippet = {
+  id: string;
+  label: string;
+  start: number;
+  end: number;
+};
+
+export type FaceBounds = {
+  cx: number;
+  cy: number;
+  x0: number;
+  x1: number;
+  y0: number;
+  y1: number;
+};
+
+export type SpeakerFaceThumbnail = {
+  id: string;
+  speakerId: string;
+  speakerLabel: string;
+  start: number;
+  end: number;
+  slotIndex: number;
+  bounds: FaceBounds;
+  src: string;
+};
+
+export type SpeakerPreview = {
+  id: string;
+  label: string;
+  thumbnails: SpeakerFaceThumbnail[];
 };

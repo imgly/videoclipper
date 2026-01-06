@@ -18,9 +18,15 @@ import { buildKeepRangesFromWords } from "@/features/shortener/keepRanges";
 import { useShortenerWorkflow } from "@/features/shortener/use-shortener-workflow";
 import type {
   CaptionSegment,
+  FaceBounds,
   GeminiRefinement,
   ProcessingStepId,
   RangeMapping,
+  RefinementMode,
+  SpeakerFaceThumbnail,
+  SpeakerPreview,
+  SpeakerSnippet,
+  SpeakerTemplateId,
   SpeechToTextProvider,
   TimeRange,
 } from "@/features/shortener/types";
@@ -34,10 +40,12 @@ import EditorModal from "@/components/shortener/editor-modal";
 import HighlightPicker from "@/components/shortener/highlight-picker";
 import ProcessingStatusCard from "@/components/shortener/processing-status-card";
 import PreviewCanvas from "@/components/shortener/preview-canvas";
+import TemplatePicker from "@/components/shortener/template-picker";
 import TimelineScrubber from "@/components/shortener/timeline-scrubber";
 import TrimFocusCard from "@/components/shortener/trim-focus-card";
 import { ThemeProvider } from "@/components/theme-provider";
 import { Button } from "@/components/ui/button";
+import { SPEAKER_TEMPLATE_OPTIONS } from "@/features/shortener/templates";
 import {
   ASPECT_RATIO_OPTIONS,
   DEFAULT_ASPECT_RATIO,
@@ -57,12 +65,37 @@ const CAPTION_ENTRY_TYPE = "caption";
 const FACE_MODEL_URI = "/models";
 const FACE_THUMBNAIL_HEIGHT = 256;
 const FACE_THUMBNAIL_TIMEOUT_MS = 2500;
+const FACE_THUMBNAIL_EXPORT_SIZE = 320;
+const FACE_THUMBNAIL_EXPORT_FALLBACKS = [256, 192, 160, 128];
+const FACE_DEBUG_EXPORT_SIZE = 640;
+const FACE_DEBUG_EXPORT_TIMEOUT_MS = 12000;
+const FACE_CROP_SCALE = 1.6;
+const FACE_CROP_MIN_RATIO = 0.2;
+const FACE_CROP_MAX_SIZE = 720;
+const FACE_CROP_RECT_SCALE = 1.05;
+const FACE_CROP_RECT_EXTRA_WIDTH = 48;
+const FACE_CROP_RECT_EXTRA_HEIGHT = 56;
+const FACE_CROP_RECT_TOP_BIAS = 0.8;
+const FACE_CROP_CORNER_RADIUS_RATIO = 0.18;
+const FACE_CROP_CORNER_RADIUS_MIN = 16;
+const FACE_CROP_CORNER_RADIUS_MAX = 72;
+const FACE_OVERLAY_COLORS = [
+  { r: 0.95, g: 0.32, b: 0.32, a: 0.22 },
+  { r: 0.23, g: 0.64, b: 0.95, a: 0.22 },
+  { r: 0.2, g: 0.82, b: 0.49, a: 0.22 },
+  { r: 0.98, g: 0.74, b: 0.18, a: 0.22 },
+  { r: 0.78, g: 0.38, b: 0.89, a: 0.22 },
+  { r: 0.95, g: 0.49, b: 0.2, a: 0.22 },
+] as const;
+const SPEAKER_SNIPPET_MIN_SECONDS = 3;
+const SPEAKER_SEGMENT_GAP_SECONDS = 0.8;
 const HOOK_DURATION_SECONDS = 5;
 const HOOK_MAX_WORDS = 18;
 const HOOK_MIN_WORDS = 6;
 const HOOK_MAX_CHARACTERS = 96;
 const HOOK_DEFAULT_TEXT = "Here's the key moment - watch what happens.";
 const DEFAULT_ANALYSIS_SECONDS = 30;
+const MIN_CLIP_DURATION_SECONDS = 1;
 
 const calculateSceneDimensions = (
   sourceWidth: number,
@@ -131,7 +164,46 @@ type AnalysisEstimate = {
 };
 
 type FaceApiModule = typeof import("face-api.js");
-type FaceBounds = { cx: number; x0: number; x1: number };
+type FaceDetectionResult = {
+  detection?: { box: { x: number; y: number; width: number; height: number } };
+  box?: { x: number; y: number; width: number; height: number };
+};
+type FaceCropRegion = {
+  size: number;
+  x: number;
+  y: number;
+};
+type FaceCropRect = {
+  width: number;
+  height: number;
+  x: number;
+  y: number;
+};
+type NormalizedCropRect = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+type PreloadScript = {
+  version: 1;
+  refinementMode: RefinementMode;
+  desiredVariants: number;
+  words: TranscriptWord[];
+  refinement: GeminiRefinement;
+  speakerSnippets: SpeakerSnippet[];
+  faceSlotsBySpeaker: Record<string, FaceBounds[]>;
+  thumbnails: SpeakerFaceThumbnail[];
+  primarySpeakerId: string | null;
+  maxFaces: number;
+  exportedAt: string;
+};
+type LayoutSlot = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
 
 export default function App() {
   const [videoFile, setVideoFile] = useState<File | null>(null);
@@ -154,6 +226,31 @@ export default function App() {
     useState<AnalysisEstimate | null>(null);
   const [analysisStage, setAnalysisStage] = useState<string | null>(null);
   const [analysisStartAt, setAnalysisStartAt] = useState<number | null>(null);
+  const [speakerSnippets, setSpeakerSnippets] = useState<SpeakerSnippet[]>([]);
+  const [speakerTemplateId, setSpeakerTemplateId] =
+    useState<SpeakerTemplateId>("none");
+  const [speakerThumbnails, setSpeakerThumbnails] = useState<
+    SpeakerFaceThumbnail[]
+  >([]);
+  const [speakerAssignedThumbnails, setSpeakerAssignedThumbnails] = useState<
+    Record<string, SpeakerFaceThumbnail>
+  >({});
+  const [speakerFaceSlots, setSpeakerFaceSlots] = useState<
+    Record<string, FaceBounds[]>
+  >({});
+  const [primaryFaceSlots, setPrimaryFaceSlots] = useState<FaceBounds[]>([]);
+  const [faceOptions, setFaceOptions] = useState<SpeakerFaceThumbnail[]>([]);
+  const [speakerAssignments, setSpeakerAssignments] = useState<
+    Record<string, number>
+  >({});
+  const [availableFaceSlots, setAvailableFaceSlots] = useState<number[]>([]);
+  const [speakerQueue, setSpeakerQueue] = useState<string[]>([]);
+  const [activeSpeakerId, setActiveSpeakerId] = useState<string | null>(null);
+  const [hasPlayedSpeakerAudio, setHasPlayedSpeakerAudio] = useState(false);
+  const [isSpeakerAudioPlaying, setIsSpeakerAudioPlaying] = useState(false);
+  const [isSpeakerIdentificationActive, setIsSpeakerIdentificationActive] =
+    useState(false);
+  const [hidePreloadThumbnails, setHidePreloadThumbnails] = useState(false);
   const [isFaceCropPending, setIsFaceCropPending] = useState(false);
   const [captionsEnabled, setCaptionsEnabled] = useState(true);
   const [textHookEnabled, setTextHookEnabled] = useState(true);
@@ -161,12 +258,21 @@ export default function App() {
     ElevenLabsTranscriptResponse | OpenAITranscriptResponse | null
   >(null);
   const [geminiDebug, setGeminiDebug] = useState<string | null>(null);
+  const [geminiFaceDebug, setGeminiFaceDebug] = useState<string | null>(null);
+  const [geminiFaceThumbnail, setGeminiFaceThumbnail] = useState<string | null>(
+    null
+  );
+  const [preloadScript, setPreloadScript] = useState<string | null>(null);
+  const [isPreloadScriptExporting, setIsPreloadScriptExporting] =
+    useState(false);
+  const [isImportScriptOpen, setIsImportScriptOpen] = useState(false);
+  const [importScriptText, setImportScriptText] = useState("");
+  const [importScriptError, setImportScriptError] = useState<string | null>(null);
+  const [isImportingScript, setIsImportingScript] = useState(false);
   const [captionDebug, setCaptionDebug] = useState<
     Record<string, CaptionSegment[]> | null
   >(null);
-  const [speechProvider, setSpeechProvider] = useState<SpeechToTextProvider>(
-    "elevenlabs"
-  );
+  const [speechProvider] = useState<SpeechToTextProvider>("elevenlabs");
   const [isDebugOpen, setIsDebugOpen] = useState(false);
   const [currentTranscriptWords, setCurrentTranscriptWords] = useState<
     TranscriptWord[]
@@ -176,6 +282,10 @@ export default function App() {
   const [isEditorOpen, setIsEditorOpen] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
+  const [isFaceDebugLoading, setIsFaceDebugLoading] = useState(false);
+  const [debugExportMetrics, setDebugExportMetrics] = useState<string | null>(
+    null
+  );
   const captionsTrackRef = useRef<number | null>(null);
   const textHookBlockRef = useRef<number | null>(null);
   const textHookTextRef = useRef<string | null>(null);
@@ -189,8 +299,30 @@ export default function App() {
   const captionPresetAppliedRef = useRef(false);
   const faceApiRef = useRef<FaceApiModule | null>(null);
   const faceModelsReadyRef = useRef<Promise<boolean> | null>(null);
-  const faceCenterCacheRef = useRef<Map<number, FaceBounds>>(new Map());
+  const faceCenterCacheRef = useRef<Map<number, FaceBounds[]>>(new Map());
   const faceCropRunIdRef = useRef(0);
+  const preloadRunIdRef = useRef(0);
+  const clipSpeakerMapRef = useRef<Map<number, string | null>>(new Map());
+  const speakerPlaybackTimeoutRef = useRef<number | null>(null);
+  const speakerAssignmentsRef = useRef<Record<string, number>>({});
+  const speakerTemplateIdRef = useRef<SpeakerTemplateId>("none");
+  const speakerSnippetsRef = useRef<SpeakerSnippet[]>([]);
+  const baseClipIdsRef = useRef<number[]>([]);
+  const clipRangesRef = useRef<TimeRange[]>([]);
+  const templateGroupIdsRef = useRef<number[]>([]);
+  const templateClipIdsRef = useRef<number[]>([]);
+  const faceOverlayIdsRef = useRef<number[]>([]);
+  const faceOverlayTrackIdsRef = useRef<number[]>([]);
+  const debugThumbnailRef = useRef<string | null>(null);
+  const lastRefinementRef = useRef<GeminiRefinement | null>(null);
+  const lastDesiredVariantsRef = useRef<number>(1);
+  const lastRefinementModeRef = useRef<RefinementMode>("disfluency");
+  const preloadSnapshotRef = useRef<PreloadScript | null>(null);
+  const pendingWorkflowRef = useRef<{
+    words: TranscriptWord[];
+    refinement: GeminiRefinement;
+    desiredVariants: number;
+  } | null>(null);
 
   const handleEngineBeforeDispose = useCallback(
     (engine: CreativeEngineInstance) => {
@@ -211,6 +343,15 @@ export default function App() {
         engine.block.isValid(textHookBlockRef.current)
       ) {
         engine.block.destroy(textHookBlockRef.current);
+      }
+      if (
+        faceOverlayTrackIdsRef.current.length
+      ) {
+        faceOverlayTrackIdsRef.current.forEach((trackId) => {
+          if (engine.block.isValid(trackId)) {
+            engine.block.destroy(trackId);
+          }
+        });
       }
     },
     []
@@ -239,12 +380,31 @@ export default function App() {
     setTextHookEnabled(true);
     setTranscriptDebug(null);
     setGeminiDebug(null);
+    setGeminiFaceDebug(null);
+    setGeminiFaceThumbnail(null);
+    setPreloadScript(null);
+    setIsPreloadScriptExporting(false);
+    setIsImportScriptOpen(false);
+    setImportScriptText("");
+    setImportScriptError(null);
+    setIsImportingScript(false);
+    setDebugExportMetrics(null);
     setCaptionDebug(null);
     setIsDebugOpen(false);
+    setIsFaceDebugLoading(false);
     faceCenterCacheRef.current.clear();
     faceCropRunIdRef.current += 1;
+    lastRefinementRef.current = null;
+    lastDesiredVariantsRef.current = 1;
+    preloadSnapshotRef.current = null;
     videoTrackRef.current = null;
     videoTemplateRef.current = null;
+    baseClipIdsRef.current = [];
+    clipRangesRef.current = [];
+    templateGroupIdsRef.current = [];
+    templateClipIdsRef.current = [];
+    faceOverlayIdsRef.current = [];
+    faceOverlayTrackIdsRef.current = [];
   }, []);
 
   const clearVideoBlocks = useCallback((engine: CreativeEngineInstance) => {
@@ -348,6 +508,98 @@ export default function App() {
     resetWorkflowState,
     beginWorkflow,
   } = useShortenerWorkflow();
+
+  const revokeSpeakerThumbnailUrls = (thumbnails: SpeakerFaceThumbnail[]) => {
+    if (
+      !thumbnails?.length ||
+      typeof URL === "undefined" ||
+      typeof URL.revokeObjectURL !== "function"
+    ) {
+      return;
+    }
+    const urls = new Set(
+      thumbnails
+        .map((thumb) => thumb.src)
+        .filter((src) => typeof src === "string" && src.startsWith("blob:"))
+    );
+    urls.forEach((url) => {
+      URL.revokeObjectURL(url);
+    });
+  };
+
+  const resetPreloadState = () => {
+    revokeSpeakerThumbnailUrls(speakerThumbnails);
+    revokeSpeakerThumbnailUrls(Object.values(speakerAssignedThumbnails));
+    setSpeakerSnippets([]);
+    setSpeakerThumbnails([]);
+    setSpeakerAssignedThumbnails({});
+    setSpeakerFaceSlots({});
+    setPrimaryFaceSlots([]);
+    setFaceOptions([]);
+    setSpeakerAssignments({});
+    setAvailableFaceSlots([]);
+    setSpeakerQueue([]);
+    setActiveSpeakerId(null);
+    setHasPlayedSpeakerAudio(false);
+    setIsSpeakerAudioPlaying(false);
+    setIsSpeakerIdentificationActive(false);
+    setHidePreloadThumbnails(false);
+    setPreloadScript(null);
+    setIsPreloadScriptExporting(false);
+    setIsImportScriptOpen(false);
+    setImportScriptText("");
+    setImportScriptError(null);
+    setIsImportingScript(false);
+    preloadRunIdRef.current += 1;
+    pendingWorkflowRef.current = null;
+    lastRefinementRef.current = null;
+    lastDesiredVariantsRef.current = 1;
+    preloadSnapshotRef.current = null;
+    if (speakerPlaybackTimeoutRef.current) {
+      window.clearTimeout(speakerPlaybackTimeoutRef.current);
+      speakerPlaybackTimeoutRef.current = null;
+    }
+    const engine = engineRef.current;
+    const pageId = pageRef.current;
+    if (engine && pageId && engine.block.isValid(pageId)) {
+      try {
+        engine.block.setPlaying(pageId, false);
+      } catch (error) {
+        console.warn("Failed to stop speaker audio during reset", error);
+      }
+    }
+    clipSpeakerMapRef.current = new Map();
+    speakerAssignmentsRef.current = {};
+    clearTemplateLayout();
+    baseClipIdsRef.current = [];
+    clipRangesRef.current = [];
+  };
+
+  useEffect(() => {
+    const previous = debugThumbnailRef.current;
+    if (
+      previous &&
+      previous !== geminiFaceThumbnail &&
+      previous.startsWith("blob:") &&
+      typeof URL !== "undefined" &&
+      typeof URL.revokeObjectURL === "function"
+    ) {
+      URL.revokeObjectURL(previous);
+    }
+    debugThumbnailRef.current = geminiFaceThumbnail;
+  }, [geminiFaceThumbnail]);
+
+  useEffect(() => {
+    speakerTemplateIdRef.current = speakerTemplateId;
+  }, [speakerTemplateId]);
+
+  useEffect(() => {
+    speakerSnippetsRef.current = speakerSnippets;
+  }, [speakerSnippets]);
+
+  useEffect(() => {
+    lastRefinementModeRef.current = refinementMode;
+  }, [refinementMode]);
 
   const updateTimelineDuration = (engineInstance?: CreativeEngineInstance) => {
     const engine = engineInstance ?? engineRef.current;
@@ -501,21 +753,947 @@ export default function App() {
       }
     });
 
-  const detectFaceCenterX = async (
+  const detectFacesInFrame = async (
     faceapi: FaceApiModule,
     img: ImageData
-  ): Promise<FaceBounds | null> => {
+  ): Promise<FaceBounds[]> => {
     const canvas = imageDataToCanvas(img);
-    const detection = await faceapi.detectSingleFace(
-      canvas,
-      new faceapi.TinyFaceDetectorOptions()
+    let detections: FaceDetectionResult[] = [];
+    let scopeStarted = false;
+    try {
+      if (faceapi.tf?.engine) {
+        faceapi.tf.engine().startScope();
+        scopeStarted = true;
+      }
+      detections = (await faceapi.detectAllFaces(
+        canvas,
+        new faceapi.TinyFaceDetectorOptions()
+      )) as FaceDetectionResult[];
+    } catch (error) {
+      console.warn("[FaceCrop] detection failed", error);
+      return [];
+    } finally {
+      if (scopeStarted) {
+        try {
+          faceapi.tf.engine().endScope();
+        } catch (scopeError) {
+          console.warn("[FaceCrop] Failed to end TensorFlow scope", scopeError);
+        }
+      }
+    }
+    if (!detections?.length) return [];
+    return detections.map((detection) => {
+      const box = "detection" in detection ? detection.detection.box : detection.box;
+      const { x, y, width, height } = box;
+      const x0 = x / canvas.width;
+      const x1 = (x + width) / canvas.width;
+      const y0 = y / canvas.height;
+      const y1 = (y + height) / canvas.height;
+      return {
+        cx: (x + width / 2) / canvas.width,
+        cy: (y + height / 2) / canvas.height,
+        x0,
+        x1,
+        y0,
+        y1,
+      };
+    });
+  };
+
+  const clampValue = (value: number, min: number, max: number) =>
+    Math.min(max, Math.max(min, value));
+
+  const normalizeCropRect = (
+    crop: FaceCropRect,
+    sourceWidth: number,
+    sourceHeight: number
+  ): NormalizedCropRect | null => {
+    const safeWidth = Math.max(1, sourceWidth);
+    const safeHeight = Math.max(1, sourceHeight);
+    let x = crop.x / safeWidth;
+    let y = crop.y / safeHeight;
+    let width = crop.width / safeWidth;
+    let height = crop.height / safeHeight;
+    if (
+      !Number.isFinite(x) ||
+      !Number.isFinite(y) ||
+      !Number.isFinite(width) ||
+      !Number.isFinite(height)
+    ) {
+      return null;
+    }
+    x = clampValue(x, 0, 1);
+    y = clampValue(y, 0, 1);
+    width = clampValue(width, 0, 1);
+    height = clampValue(height, 0, 1);
+    width = Math.max(0.01, Math.min(width, 1 - x));
+    height = Math.max(0.01, Math.min(height, 1 - y));
+    return { x, y, width, height };
+  };
+
+  const buildFacePixelCropRect = (
+    face: FaceBounds,
+    sourceWidth: number,
+    sourceHeight: number
+  ): FaceCropRect => {
+    const safeWidth = Math.max(1, sourceWidth);
+    const safeHeight = Math.max(1, sourceHeight);
+    const x0 = clampValue(face.x0, 0, 1) * safeWidth;
+    const x1 = clampValue(face.x1, 0, 1) * safeWidth;
+    const y0 = clampValue(face.y0, 0, 1) * safeHeight;
+    const y1 = clampValue(face.y1, 0, 1) * safeHeight;
+    const width = Math.max(1, x1 - x0);
+    const height = Math.max(1, y1 - y0);
+    const maxX = Math.max(0, safeWidth - width);
+    const maxY = Math.max(0, safeHeight - height);
+    return {
+      x: clampValue(x0, 0, maxX),
+      y: clampValue(y0, 0, maxY),
+      width,
+      height,
+    };
+  };
+
+  const scaleCropRect = (
+    rect: FaceCropRect,
+    scale: number,
+    maxWidth: number,
+    maxHeight: number,
+    extraWidth = 0,
+    extraHeight = 0,
+    topBias = 0.5
+  ): FaceCropRect => {
+    const safeScale =
+      Number.isFinite(scale) && scale > 0 ? scale : 1;
+    const safeExtraWidth =
+      Number.isFinite(extraWidth) ? extraWidth : 0;
+    const safeExtra =
+      Number.isFinite(extraHeight) ? extraHeight : 0;
+    const safeBias =
+      Number.isFinite(topBias) ? clampValue(topBias, 0, 1) : 0.5;
+    if (safeScale === 1 && safeExtra === 0 && safeExtraWidth === 0) {
+      return rect;
+    }
+    const width = Math.max(1, rect.width * safeScale);
+    const height = Math.max(
+      1,
+      rect.height * safeScale + safeExtra
     );
-    if (!detection) return null;
-    const { x, width } = detection.box;
-    const cx = (x + width / 2) / canvas.width;
-    const x0 = x / canvas.width;
-    const x1 = (x + width) / canvas.width;
-    return { cx, x0, x1 };
+    const expandedWidth = Math.max(1, width + safeExtraWidth);
+    const centerX = rect.x + rect.width / 2;
+    const centerY = rect.y + rect.height / 2;
+    const biasShift = (safeBias - 0.5) * safeExtra;
+    const safeMaxWidth = Math.max(1, maxWidth);
+    const safeMaxHeight = Math.max(1, maxHeight);
+    const maxX = Math.max(0, safeMaxWidth - expandedWidth);
+    const maxY = Math.max(0, safeMaxHeight - height);
+    return {
+      width: expandedWidth,
+      height,
+      x: clampValue(centerX - expandedWidth / 2, 0, maxX),
+      y: clampValue(centerY - biasShift - height / 2, 0, maxY),
+    };
+  };
+
+  const applyRoundedCorners = (
+    engine: CreativeEngineInstance,
+    shapeId: number,
+    clipId: number,
+    radius: number
+  ) => {
+    const safeRadius =
+      Number.isFinite(radius) && radius > 0 ? radius : 0;
+    if (!safeRadius) return;
+    const applyToTarget = (targetId: number) => {
+      let props: string[] = [];
+      try {
+        props = engine.block.findAllProperties(targetId) ?? [];
+      } catch (error) {
+        return false;
+      }
+      const cornerProps = props.filter((prop) =>
+        prop.includes("cornerRadius")
+      );
+      if (cornerProps.length) {
+        cornerProps.forEach((prop) => {
+          try {
+            engine.block.setFloat(targetId, prop, safeRadius);
+          } catch (error) {
+            // ignore invalid radius fields
+          }
+        });
+        return true;
+      }
+      const shapeRadiusProps = props.filter(
+        (prop) => prop.includes("shape") && prop.includes("radius")
+      );
+      if (!shapeRadiusProps.length) return false;
+      shapeRadiusProps.forEach((prop) => {
+        try {
+          engine.block.setFloat(targetId, prop, safeRadius);
+        } catch (error) {
+          // ignore invalid radius fields
+        }
+      });
+      return true;
+    };
+    if (engine.block.isValid(shapeId)) {
+      const applied = applyToTarget(shapeId);
+      if (applied) return;
+    }
+    if (engine.block.isValid(clipId)) {
+      applyToTarget(clipId);
+    }
+  };
+
+  const applyNormalizedCrop = (
+    engine: CreativeEngineInstance,
+    clipId: number,
+    crop: NormalizedCropRect
+  ) => {
+    const blockApi = engine.block as unknown as {
+      setCrop?: (id: number, value: NormalizedCropRect) => void;
+      resetCrop?: (id: number) => void;
+    };
+    if (typeof blockApi.setCrop !== "function") return false;
+    const applyToTarget = (targetId: number) => {
+      try {
+        blockApi.resetCrop?.(targetId);
+      } catch (error) {
+        console.warn("Failed to reset crop before applying", error);
+      }
+      try {
+        blockApi.setCrop?.(targetId, crop);
+        return true;
+      } catch (error) {
+        console.warn("Failed to apply normalized crop", error);
+        return false;
+      }
+    };
+    const targetIds: number[] = [];
+    try {
+      const fillId = engine.block.getFill(clipId);
+      if (fillId && engine.block.isValid(fillId)) {
+        targetIds.push(fillId);
+      }
+    } catch (error) {
+      console.warn("Failed to apply crop on fill", error);
+    }
+    targetIds.push(clipId);
+    for (const targetId of targetIds) {
+      if (applyToTarget(targetId)) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  const applyRectCropScaleTranslation = (
+    engine: CreativeEngineInstance,
+    clipId: number,
+    crop: FaceCropRect,
+    options?: { resizeToCrop?: boolean }
+  ) => {
+    if (!engine.block.isValid(clipId)) return false;
+    let blockWidth = 0;
+    let blockHeight = 0;
+    let blockX = 0;
+    let blockY = 0;
+    try {
+      blockWidth = engine.block.getWidth(clipId);
+      blockHeight = engine.block.getHeight(clipId);
+      blockX = engine.block.getPositionX(clipId);
+      blockY = engine.block.getPositionY(clipId);
+    } catch (error) {
+      console.warn("Failed to read clip layout for crop", error);
+      return false;
+    }
+    if (
+      !Number.isFinite(blockWidth) ||
+      !Number.isFinite(blockHeight) ||
+      blockWidth <= 0 ||
+      blockHeight <= 0
+    ) {
+      return false;
+    }
+    const cropWidth = Math.max(1, crop.width);
+    const cropHeight = Math.max(1, crop.height);
+    const scaleX = blockWidth / cropWidth;
+    const scaleY = blockHeight / cropHeight;
+    const translateX = -crop.x / cropWidth;
+    const translateY = -crop.y / cropHeight;
+    if (
+      !Number.isFinite(scaleX) ||
+      !Number.isFinite(scaleY) ||
+      !Number.isFinite(translateX) ||
+      !Number.isFinite(translateY)
+    ) {
+      return false;
+    }
+    const applyToTarget = (targetId: number) => {
+      try {
+        engine.block.resetCrop(targetId);
+        engine.block.setCropScaleX(targetId, scaleX);
+        engine.block.setCropScaleY(targetId, scaleY);
+        engine.block.setCropTranslationX(targetId, translateX);
+        engine.block.setCropTranslationY(targetId, translateY);
+        return true;
+      } catch (error) {
+        console.warn("Failed to apply rectangular crop", error);
+        return false;
+      }
+    };
+    const appliedClip = applyToTarget(clipId);
+    let appliedFill = false;
+    try {
+      const fillId = engine.block.getFill(clipId);
+      if (fillId && engine.block.isValid(fillId)) {
+        appliedFill = applyToTarget(fillId);
+      }
+    } catch (error) {
+      console.warn("Failed to resolve crop fill", error);
+    }
+    const applied = appliedClip || appliedFill;
+    if (applied && options?.resizeToCrop) {
+      try {
+        engine.block.setWidth(clipId, cropWidth);
+        engine.block.setHeight(clipId, cropHeight);
+        engine.block.setPosition(clipId, blockX + crop.x, blockY + crop.y);
+      } catch (error) {
+        console.warn("Failed to resize clip for crop", error);
+      }
+    }
+    return applied;
+  };
+
+
+  const applyFaceCropScaleTranslation = (
+    engine: CreativeEngineInstance,
+    clipId: number,
+    face: FaceBounds,
+    sceneWidth: number,
+    sceneHeight: number,
+    normalizedFaceSize?: number | null
+  ) => {
+    const targetAspect =
+      sceneWidth > 0 && sceneHeight > 0 ? sceneWidth / sceneHeight : 1;
+    const crop = buildFaceCropRect(
+      face,
+      sourceVideoSize?.width ?? 1920,
+      sourceVideoSize?.height ?? 1080,
+      targetAspect,
+      normalizedFaceSize
+    );
+    const baseScale = Math.max(
+      sceneWidth / (sourceVideoSize?.width ?? 1920),
+      sceneHeight / (sourceVideoSize?.height ?? 1080)
+    );
+    const desiredScale =
+      crop.width > 0 ? sceneWidth / crop.width : baseScale;
+    const scaleRatio = baseScale > 0 ? desiredScale / baseScale : 1;
+    const safeScale = Math.max(1, scaleRatio);
+    const contentWidth =
+      (sourceVideoSize?.width ?? 1920) * baseScale * safeScale;
+    const contentHeight =
+      (sourceVideoSize?.height ?? 1080) * baseScale * safeScale;
+    const faceCx = face.cx * (sourceVideoSize?.width ?? 1920);
+    const faceCy = face.cy * (sourceVideoSize?.height ?? 1080);
+    const translateX =
+      (baseScale * safeScale * ((sourceVideoSize?.width ?? 1920) / 2 - faceCx)) /
+      sceneWidth;
+    const translateY =
+      (baseScale *
+        safeScale *
+        ((sourceVideoSize?.height ?? 1080) / 2 - faceCy)) /
+      sceneHeight;
+    const maxShiftX = Math.max(0, (contentWidth - sceneWidth) / (2 * sceneWidth));
+    const maxShiftY = Math.max(
+      0,
+      (contentHeight - sceneHeight) / (2 * sceneHeight)
+    );
+    try {
+      engine.block.resetCrop(clipId);
+      engine.block.setCropScaleRatio(clipId, safeScale);
+      engine.block.setCropTranslationX(
+        clipId,
+        clampValue(translateX, -maxShiftX, maxShiftX)
+      );
+      engine.block.setCropTranslationY(
+        clipId,
+        clampValue(translateY, -maxShiftY, maxShiftY)
+      );
+      return true;
+    } catch (error) {
+      console.warn("Failed to apply crop scale/translation", error);
+      return false;
+    }
+  };
+
+  const applySquareCropScaleTranslation = useCallback(
+    (
+      engine: CreativeEngineInstance,
+      clipId: number,
+      face: FaceBounds,
+      sceneWidth: number,
+      sceneHeight: number,
+      sourceWidth: number,
+      sourceHeight: number
+    ) => {
+      const resolveCropTarget = () => {
+        if (engine.block.supportsCrop(clipId)) return clipId;
+        try {
+          const fillId = engine.block.getFill(clipId);
+          if (fillId && engine.block.isValid(fillId)) {
+            if (engine.block.supportsCrop(fillId)) return fillId;
+          }
+        } catch (error) {
+          console.warn("Failed to resolve crop target for solo clip", error);
+        }
+        return null;
+      };
+      const cropTarget = resolveCropTarget();
+      if (!cropTarget) return false;
+      if (
+        !Number.isFinite(sceneWidth) ||
+        !Number.isFinite(sceneHeight) ||
+        sceneWidth <= 0 ||
+        sceneHeight <= 0 ||
+        !Number.isFinite(sourceWidth) ||
+        !Number.isFinite(sourceHeight) ||
+        sourceWidth <= 0 ||
+        sourceHeight <= 0
+      ) {
+        return false;
+      }
+      const region = buildFaceCropRegion(
+        face,
+        sourceWidth,
+        sourceHeight,
+        FACE_CROP_MAX_SIZE
+      );
+      const baseScale = Math.max(
+        sceneWidth / sourceWidth,
+        sceneHeight / sourceHeight
+      );
+      const desiredScale = Math.max(sceneWidth, sceneHeight) / region.size;
+      const scaleRatio = baseScale > 0 ? desiredScale / baseScale : 1;
+      const safeScale = Math.max(1, scaleRatio);
+      const contentWidth = sourceWidth * baseScale * safeScale;
+      const contentHeight = sourceHeight * baseScale * safeScale;
+      const centerX = region.x + region.size / 2;
+      const centerY = region.y + region.size / 2;
+      const translateX =
+        (baseScale * safeScale * (sourceWidth / 2 - centerX)) / sceneWidth;
+      const translateY =
+        (baseScale * safeScale * (sourceHeight / 2 - centerY)) / sceneHeight;
+      const maxShiftX = Math.max(0, (contentWidth - sceneWidth) / (2 * sceneWidth));
+      const maxShiftY = Math.max(
+        0,
+        (contentHeight - sceneHeight) / (2 * sceneHeight)
+      );
+      try {
+        engine.block.resetCrop(cropTarget);
+        engine.block.setCropScaleRatio(cropTarget, safeScale);
+        engine.block.setCropTranslationX(
+          cropTarget,
+          clampValue(translateX, -maxShiftX, maxShiftX)
+        );
+        engine.block.setCropTranslationY(
+          cropTarget,
+          clampValue(translateY, -maxShiftY, maxShiftY)
+        );
+        return true;
+      } catch (error) {
+        console.warn("Failed to apply square crop translation", error);
+        return false;
+      }
+    },
+    []
+  );
+
+  const applyFaceCropByResizing = (
+    engine: CreativeEngineInstance,
+    clipId: number,
+    face: FaceBounds,
+    sceneWidth: number,
+    sceneHeight: number,
+    sourceWidth: number,
+    sourceHeight: number,
+    normalizedFaceSize?: number | null
+  ) => {
+    if (!engine.block.isValid(clipId)) return false;
+    if (
+      !Number.isFinite(sceneWidth) ||
+      !Number.isFinite(sceneHeight) ||
+      sceneWidth <= 0 ||
+      sceneHeight <= 0
+    ) {
+      return false;
+    }
+    const targetAspect =
+      sceneWidth > 0 && sceneHeight > 0 ? sceneWidth / sceneHeight : 1;
+    const crop = buildFaceCropRect(
+      face,
+      sourceWidth,
+      sourceHeight,
+      targetAspect,
+      normalizedFaceSize
+    );
+    if (
+      !Number.isFinite(crop.width) ||
+      !Number.isFinite(crop.height) ||
+      crop.width <= 0 ||
+      crop.height <= 0
+    ) {
+      return false;
+    }
+    const scale = Math.max(
+      1,
+      Math.max(sceneWidth / crop.width, sceneHeight / crop.height)
+    );
+    if (!Number.isFinite(scale) || scale <= 0) return false;
+    const scaledWidth = sourceWidth * scale;
+    const scaledHeight = sourceHeight * scale;
+    const faceX = face.cx * sourceWidth * scale;
+    const faceY = face.cy * sourceHeight * scale;
+    const rawX = sceneWidth / 2 - faceX;
+    const rawY = sceneHeight / 2 - faceY;
+    const minX = sceneWidth - scaledWidth;
+    const minY = sceneHeight - scaledHeight;
+    const posX = clampValue(rawX, minX, 0);
+    const posY = clampValue(rawY, minY, 0);
+    try {
+      engine.block.setSize(clipId, scaledWidth, scaledHeight);
+      engine.block.setPosition(clipId, posX, posY);
+      return true;
+    } catch (error) {
+      console.warn("Failed to resize clip for face crop", error);
+      return false;
+    }
+  };
+
+  const resetClipLayoutForScene = (
+    engine: CreativeEngineInstance,
+    clipId: number,
+    sceneWidth: number,
+    sceneHeight: number
+  ) => {
+    if (!engine.block.isValid(clipId)) return;
+    const safeWidth =
+      Number.isFinite(sceneWidth) && sceneWidth > 0 ? sceneWidth : 1;
+    const safeHeight =
+      Number.isFinite(sceneHeight) && sceneHeight > 0 ? sceneHeight : 1;
+    try {
+      engine.block.setSize(clipId, safeWidth, safeHeight);
+      engine.block.setPosition(clipId, 0, 0);
+    } catch (error) {
+      console.warn("Failed to reset clip layout", error);
+    }
+    try {
+      engine.block.resetCrop(clipId);
+      engine.block.setCropScaleRatio(clipId, 1);
+      engine.block.setCropTranslationX(clipId, 0);
+      engine.block.setCropTranslationY(clipId, 0);
+    } catch (error) {
+      console.warn("Failed to reset clip crop", error);
+    }
+    try {
+      const fillId = engine.block.getFill(clipId);
+      if (fillId && engine.block.isValid(fillId)) {
+        engine.block.resetCrop(fillId);
+      }
+    } catch (error) {
+      console.warn("Failed to reset fill crop", error);
+    }
+  };
+
+  const scaleClipToSceneCover = useCallback(
+    (
+      engine: CreativeEngineInstance,
+      clipId: number,
+      sceneWidth: number,
+      sceneHeight: number,
+      sourceWidth: number,
+      sourceHeight: number
+    ) => {
+      if (!engine.block.isValid(clipId)) return false;
+      if (
+        !Number.isFinite(sceneWidth) ||
+        !Number.isFinite(sceneHeight) ||
+        sceneWidth <= 0 ||
+        sceneHeight <= 0
+      ) {
+        return false;
+      }
+      const safeSourceWidth = sourceWidth > 0 ? sourceWidth : 1;
+      const safeSourceHeight = sourceHeight > 0 ? sourceHeight : 1;
+      const scale = Math.max(
+        sceneWidth / safeSourceWidth,
+        sceneHeight / safeSourceHeight
+      );
+      if (!Number.isFinite(scale) || scale <= 0) return false;
+      const scaledWidth = safeSourceWidth * scale;
+      const scaledHeight = safeSourceHeight * scale;
+      const posX = (sceneWidth - scaledWidth) / 2;
+      const posY = (sceneHeight - scaledHeight) / 2;
+      try {
+        engine.block.setSize(clipId, scaledWidth, scaledHeight);
+        engine.block.setPosition(clipId, posX, posY);
+        return true;
+      } catch (error) {
+        console.warn("Failed to scale clip to cover scene", error);
+        return false;
+      }
+    },
+    []
+  );
+
+  const buildFaceCropRegion = (
+    face: FaceBounds,
+    sourceWidth: number,
+    sourceHeight: number,
+    maxSize?: number
+  ): FaceCropRegion => {
+    const faceWidth = Math.max(1, (face.x1 - face.x0) * sourceWidth);
+    const faceHeight = Math.max(1, (face.y1 - face.y0) * sourceHeight);
+    const minDimension = Math.min(sourceWidth, sourceHeight);
+    const baseSize = Math.max(faceWidth, faceHeight) * FACE_CROP_SCALE;
+    const minSize = minDimension * FACE_CROP_MIN_RATIO;
+    const cropSize = Math.min(minDimension, Math.max(baseSize, minSize));
+    const resolvedMaxSize =
+      typeof maxSize === "number" && Number.isFinite(maxSize) && maxSize > 0
+        ? maxSize
+        : Number.POSITIVE_INFINITY;
+    const clampedSize = Math.min(cropSize, resolvedMaxSize);
+    const safeSize = Number.isFinite(clampedSize) && clampedSize > 0 ? clampedSize : 1;
+    const centerX = face.cx * sourceWidth;
+    const centerY = face.cy * sourceHeight;
+    const maxX = Math.max(0, sourceWidth - safeSize);
+    const maxY = Math.max(0, sourceHeight - safeSize);
+    return {
+      size: safeSize,
+      x: clampValue(centerX - safeSize / 2, 0, maxX),
+      y: clampValue(centerY - safeSize / 2, 0, maxY),
+    };
+  };
+
+  const applySquareCropByResizing = useCallback(
+    (
+      engine: CreativeEngineInstance,
+      clipId: number,
+      face: FaceBounds,
+      sceneWidth: number,
+      sceneHeight: number,
+      sourceWidth: number,
+      sourceHeight: number
+    ) => {
+      if (!engine.block.isValid(clipId)) return false;
+      if (
+        !Number.isFinite(sceneWidth) ||
+        !Number.isFinite(sceneHeight) ||
+        sceneWidth <= 0 ||
+        sceneHeight <= 0
+      ) {
+        return false;
+      }
+      const region = buildFaceCropRegion(
+        face,
+        sourceWidth,
+        sourceHeight,
+        FACE_CROP_MAX_SIZE
+      );
+      if (!Number.isFinite(region.size) || region.size <= 0) {
+        return false;
+      }
+      const minScale = Math.max(
+        sceneWidth / sourceWidth,
+        sceneHeight / sourceHeight
+      );
+      const squareScale = Math.max(
+        sceneWidth / region.size,
+        sceneHeight / region.size
+      );
+      const scale = Math.max(minScale, squareScale);
+      if (!Number.isFinite(scale) || scale <= 0) return false;
+      const scaledWidth = sourceWidth * scale;
+      const scaledHeight = sourceHeight * scale;
+      const centerX = (region.x + region.size / 2) * scale;
+      const centerY = (region.y + region.size / 2) * scale;
+      const rawX = sceneWidth / 2 - centerX;
+      const rawY = sceneHeight / 2 - centerY;
+      const minX = sceneWidth - scaledWidth;
+      const minY = sceneHeight - scaledHeight;
+      const posX = clampValue(rawX, minX, 0);
+      const posY = clampValue(rawY, minY, 0);
+      try {
+        engine.block.setSize(clipId, scaledWidth, scaledHeight);
+        engine.block.setPosition(clipId, posX, posY);
+        return true;
+      } catch (error) {
+        console.warn("Failed to resize clip for square crop", error);
+        return false;
+      }
+    },
+    []
+  );
+
+  const computeNormalizedFaceSize = (
+    faces: FaceBounds[],
+    sourceWidth: number,
+    sourceHeight: number
+  ) => {
+    if (!faces.length) return null;
+    const sizes = faces
+      .map((face) => {
+        const faceWidth = Math.max(1, (face.x1 - face.x0) * sourceWidth);
+        const faceHeight = Math.max(1, (face.y1 - face.y0) * sourceHeight);
+        return Math.max(faceWidth, faceHeight);
+      })
+      .filter((size) => Number.isFinite(size) && size > 0)
+      .sort((a, b) => a - b);
+    if (!sizes.length) return null;
+    const median = sizes[Math.floor(sizes.length / 2)];
+    return Number.isFinite(median) && median > 0 ? median : null;
+  };
+
+  const buildFaceCropRect = (
+    face: FaceBounds,
+    sourceWidth: number,
+    sourceHeight: number,
+    targetAspect: number,
+    normalizedFaceSize?: number | null
+  ): FaceCropRect => {
+    const faceWidth = Math.max(1, (face.x1 - face.x0) * sourceWidth);
+    const faceHeight = Math.max(1, (face.y1 - face.y0) * sourceHeight);
+    const faceSize = Math.max(faceWidth, faceHeight);
+    const minDimension = Math.min(sourceWidth, sourceHeight);
+    const minSize = minDimension * FACE_CROP_MIN_RATIO;
+    const targetSize =
+      typeof normalizedFaceSize === "number" && normalizedFaceSize > 0
+        ? normalizedFaceSize
+        : faceSize;
+    const scaleFactor = clampValue(targetSize / faceSize, 0.75, 1.25);
+    const baseSize = Math.max(faceSize * FACE_CROP_SCALE * scaleFactor, minSize);
+    let cropWidth = baseSize;
+    let cropHeight = baseSize;
+    if (Number.isFinite(targetAspect) && targetAspect > 0) {
+      if (targetAspect >= 1) {
+        cropWidth = baseSize * targetAspect;
+        cropHeight = baseSize;
+      } else {
+        cropWidth = baseSize;
+        cropHeight = baseSize / targetAspect;
+      }
+    }
+    if (cropWidth > sourceWidth) {
+      const scale = sourceWidth / cropWidth;
+      cropWidth *= scale;
+      cropHeight *= scale;
+    }
+    if (cropHeight > sourceHeight) {
+      const scale = sourceHeight / cropHeight;
+      cropWidth *= scale;
+      cropHeight *= scale;
+    }
+    const centerX = face.cx * sourceWidth;
+    const centerY = face.cy * sourceHeight;
+    const maxX = Math.max(0, sourceWidth - cropWidth);
+    const maxY = Math.max(0, sourceHeight - cropHeight);
+    return {
+      width: cropWidth,
+      height: cropHeight,
+      x: clampValue(centerX - cropWidth / 2, 0, maxX),
+      y: clampValue(centerY - cropHeight / 2, 0, maxY),
+    };
+  };
+
+  const buildGridSlots = (
+    area: LayoutSlot,
+    count: number,
+    columns: number,
+    gap: number
+  ) => {
+    if (!count) return [];
+    const safeColumns = Math.max(1, Math.min(columns, count));
+    const rows = Math.max(1, Math.ceil(count / safeColumns));
+    const totalGapX = gap * Math.max(0, safeColumns - 1);
+    const totalGapY = gap * Math.max(0, rows - 1);
+    const slotWidth = (area.width - totalGapX) / safeColumns;
+    const slotHeight = (area.height - totalGapY) / rows;
+    return Array.from({ length: count }, (_, index) => {
+      const row = Math.floor(index / safeColumns);
+      const col = index % safeColumns;
+      return {
+        x: area.x + col * (slotWidth + gap),
+        y: area.y + row * (slotHeight + gap),
+        width: slotWidth,
+        height: slotHeight,
+      };
+    });
+  };
+
+  const buildTemplateLayout = (
+    templateId: SpeakerTemplateId,
+    sceneWidth: number,
+    sceneHeight: number,
+    speakerCount: number
+  ) => {
+    const thumbCount = Math.max(0, speakerCount - 1);
+    const margin = Math.max(16, Math.min(sceneWidth, sceneHeight) * 0.04);
+    const gap = Math.max(10, Math.min(sceneWidth, sceneHeight) * 0.03);
+
+    if (templateId === "solo") {
+      return {
+        active: {
+          x: 0,
+          y: 0,
+          width: sceneWidth,
+          height: sceneHeight,
+        },
+        thumbs: [],
+      };
+    }
+
+    if (templateId === "multi") {
+      const thumbsHeight = sceneHeight * 0.26;
+      const active: LayoutSlot = {
+        x: margin,
+        y: margin,
+        width: Math.max(0, sceneWidth - margin * 2),
+        height: Math.max(
+          0,
+          sceneHeight - margin * 2 - gap - thumbsHeight
+        ),
+      };
+      const thumbsArea: LayoutSlot = {
+        x: margin,
+        y: active.y + active.height + gap,
+        width: Math.max(0, sceneWidth - margin * 2),
+        height: thumbsHeight,
+      };
+      const columns = Math.min(thumbCount, 3);
+      return {
+        active,
+        thumbs: buildGridSlots(thumbsArea, thumbCount, columns || 1, gap * 0.6),
+      };
+    }
+
+    if (templateId === "sidecar") {
+      const thumbAreaWidth = sceneWidth * 0.22;
+      const activeWidth = Math.max(
+        sceneWidth - margin * 2 - gap - thumbAreaWidth,
+        sceneWidth * 0.5
+      );
+      const active: LayoutSlot = {
+        x: margin,
+        y: margin,
+        width: activeWidth,
+        height: Math.max(0, sceneHeight - margin * 2),
+      };
+      const thumbsArea: LayoutSlot = {
+        x: active.x + active.width + gap,
+        y: margin,
+        width: Math.max(0, sceneWidth - margin - (active.x + active.width + gap)),
+        height: Math.max(0, sceneHeight - margin * 2),
+      };
+      const columns = thumbCount > 4 ? 2 : 1;
+      return {
+        active,
+        thumbs: buildGridSlots(thumbsArea, thumbCount, columns, gap * 0.6),
+      };
+    }
+
+    if (templateId === "overlay") {
+      const thumbsHeight = sceneHeight * 0.22;
+      const active: LayoutSlot = {
+        x: margin,
+        y: margin,
+        width: Math.max(0, sceneWidth - margin * 2),
+        height: Math.max(0, sceneHeight - margin * 2),
+      };
+      const thumbsArea: LayoutSlot = {
+        x: margin,
+        y: Math.max(
+          margin,
+          sceneHeight - margin - thumbsHeight
+        ),
+        width: Math.max(0, sceneWidth - margin * 2),
+        height: thumbsHeight,
+      };
+      const columns = Math.min(thumbCount, 3);
+      return {
+        active,
+        thumbs: buildGridSlots(thumbsArea, thumbCount, columns || 1, gap * 0.6),
+      };
+    }
+
+    const thumbsHeight = sceneHeight * 0.22;
+    const active: LayoutSlot = {
+      x: margin,
+      y: margin,
+      width: Math.max(0, sceneWidth - margin * 2),
+      height: Math.max(
+        0,
+        sceneHeight - margin * 2 - gap - thumbsHeight
+      ),
+    };
+    const thumbsArea: LayoutSlot = {
+      x: margin,
+      y: active.y + active.height + gap,
+      width: Math.max(0, sceneWidth - margin * 2),
+      height: thumbsHeight,
+    };
+    const columns = Math.min(thumbCount, 3);
+    return {
+      active,
+      thumbs: buildGridSlots(thumbsArea, thumbCount, columns || 1, gap * 0.6),
+    };
+  };
+
+  const ensureFaceApiBackend = async (faceapi: FaceApiModule) => {
+    try {
+      await import("@tensorflow/tfjs-core/dist/kernels/backend_webgl");
+      await import("@tensorflow/tfjs-core/dist/kernels/backend_cpu");
+    } catch (error) {
+      console.warn("[FaceCrop] Failed to load TensorFlow.js backends", error);
+      return false;
+    }
+    const trySetBackend = async (name: "webgl" | "cpu") => {
+      try {
+        await faceapi.tf.setBackend(name);
+        if (typeof faceapi.tf.ready === "function") {
+          await faceapi.tf.ready();
+        }
+        if (typeof faceapi.tf.getBackend === "function") {
+          return faceapi.tf.getBackend() === name;
+        }
+        return true;
+      } catch (error) {
+        console.warn(`[FaceCrop] Failed to set ${name} backend`, error);
+        return false;
+      }
+    };
+    const existingBackend =
+      typeof faceapi.tf.getBackend === "function"
+        ? faceapi.tf.getBackend()
+        : null;
+    if (existingBackend) {
+      if (typeof faceapi.tf.ready === "function") {
+        await faceapi.tf.ready();
+      }
+      return true;
+    }
+    let backendReady = await trySetBackend("webgl");
+    if (!backendReady) {
+      backendReady = await trySetBackend("cpu");
+    }
+    if (!backendReady) {
+      console.warn(
+        "[FaceCrop] No TensorFlow backend available; skipping smart crop."
+      );
+      return false;
+    }
+    return true;
   };
 
   const loadFaceModels = useCallback(async () => {
@@ -526,6 +1704,10 @@ export default function App() {
       try {
         const faceapi = await import("face-api.js");
         faceApiRef.current = faceapi;
+        const backendReady = await ensureFaceApiBackend(faceapi);
+        if (!backendReady) {
+          return false;
+        }
         if (!faceapi.nets.tinyFaceDetector.isLoaded) {
           await faceapi.nets.tinyFaceDetector.loadFromUri(FACE_MODEL_URI);
         }
@@ -554,69 +1736,272 @@ export default function App() {
     return Math.min(0.1, duration * 0.25);
   };
 
-  const positionClipForFace = (
-    engine: CreativeEngineInstance,
-    clipId: number,
-    faceCx: number,
-    sceneWidth: number,
-    sceneHeight: number
-  ) => {
-    const blockWidth = engine.block.getWidth(clipId);
-    const blockHeight = engine.block.getHeight(clipId);
-    if (
-      !Number.isFinite(blockWidth) ||
-      !Number.isFinite(blockHeight) ||
-      blockWidth <= sceneWidth
-    ) {
-      return;
-    }
-    const targetX = sceneWidth * 0.5 - faceCx * blockWidth;
-    const minX = sceneWidth - blockWidth;
-    const maxX = 0;
-    const clampedX = Math.min(maxX, Math.max(minX, targetX));
-    const posY = (sceneHeight - blockHeight) / 2;
-    try {
-      engine.block.setPosition(clipId, clampedX, posY);
-    } catch (error) {
-      console.warn("Failed to reposition clip for face crop", error);
-    }
-  };
-
-  const detectFaceForClip = useCallback(
-    async (engine: CreativeEngineInstance, clipId: number) => {
-      if (!engine.block.isValid(clipId)) {
-        return null;
-      }
-      const cached = faceCenterCacheRef.current.get(clipId);
-      if (cached) {
-        console.info("[FaceCrop] cache hit", { clipId, face: cached });
-        return cached;
-      }
-      const faceapi = faceApiRef.current;
-      if (!faceapi) {
-        console.info("[FaceCrop] face-api not ready", { clipId });
-        return null;
-      }
+  const positionClipForFace = useCallback(
+    (
+      engine: CreativeEngineInstance,
+      clipId: number,
+      faceCx: number,
+      sceneWidth: number,
+      sceneHeight: number
+    ) => {
+      if (!engine.block.isValid(clipId)) return;
+      let blockWidth = 0;
+      let blockHeight = 0;
       try {
-        const sampleTime = getClipSampleTime(engine, clipId);
-        console.info("[FaceCrop] sampling frame", { clipId, sampleTime });
-        const frame = await grabFrame(engine, clipId, sampleTime);
-        const face = await detectFaceCenterX(faceapi, frame);
-        console.info("[FaceCrop] detection result", { clipId, face });
-        if (face) {
-          faceCenterCacheRef.current.set(clipId, face);
-        }
-        return face;
+        blockWidth = engine.block.getWidth(clipId);
+        blockHeight = engine.block.getHeight(clipId);
       } catch (error) {
-        console.warn("Failed to detect face for clip", error);
-        return null;
+        console.warn("Failed to read clip size for face crop", error);
+        return;
+      }
+      if (
+        !Number.isFinite(blockWidth) ||
+        !Number.isFinite(blockHeight) ||
+        blockWidth <= sceneWidth
+      ) {
+        return;
+      }
+      const targetX = sceneWidth * 0.5 - faceCx * blockWidth;
+      const minX = sceneWidth - blockWidth;
+      const maxX = 0;
+      const clampedX = Math.min(maxX, Math.max(minX, targetX));
+      const posY = (sceneHeight - blockHeight) / 2;
+      try {
+        engine.block.setPosition(clipId, clampedX, posY);
+      } catch (error) {
+        console.warn("Failed to reposition clip for face crop", error);
       }
     },
     []
   );
 
+  const positionClipCentered = useCallback(
+    (
+      engine: CreativeEngineInstance,
+      clipId: number,
+      sceneWidth: number,
+      sceneHeight: number
+    ) => {
+      if (!engine.block.isValid(clipId)) return;
+      let blockWidth = 0;
+      let blockHeight = 0;
+      try {
+        blockWidth = engine.block.getWidth(clipId);
+        blockHeight = engine.block.getHeight(clipId);
+      } catch (error) {
+        console.warn("Failed to read clip size for centering", error);
+        return;
+      }
+      if (!Number.isFinite(blockWidth) || !Number.isFinite(blockHeight)) {
+        return;
+      }
+      const posX = (sceneWidth - blockWidth) / 2;
+      const posY = (sceneHeight - blockHeight) / 2;
+      try {
+        engine.block.setPosition(clipId, posX, posY);
+      } catch (error) {
+        console.warn("Failed to center clip position", error);
+      }
+    },
+    []
+  );
+
+  const getPrimaryVideoBlock = (engine: CreativeEngineInstance) => {
+    if (videoBlockRef.current && engine.block.isValid(videoBlockRef.current)) {
+      return videoBlockRef.current;
+    }
+    if (videoTrackRef.current && engine.block.isValid(videoTrackRef.current)) {
+      const children = engine.block.getChildren(videoTrackRef.current) ?? [];
+      const candidate = children.find((child) => engine.block.isValid(child));
+      if (candidate) return candidate;
+    }
+    return null;
+  };
+
+  const exportFaceThumbnail = async (
+    engine: CreativeEngineInstance,
+    pageId: number,
+    clipId: number,
+    atSeconds: number,
+    face: FaceBounds
+  ) => {
+    if (!engine.block.isValid(pageId) || !engine.block.isValid(clipId)) {
+      return null;
+    }
+    const playbackSupported = engine.block.supportsPlaybackTime(pageId);
+    const previousPageWidth = engine.block.getWidth(pageId);
+    const previousPageHeight = engine.block.getHeight(pageId);
+    const previousClipWidth = engine.block.getWidth(clipId);
+    const previousClipHeight = engine.block.getHeight(clipId);
+    const previousClipX = engine.block.getPositionX(clipId);
+    const previousClipY = engine.block.getPositionY(clipId);
+    const previousPlaybackTime = playbackSupported
+      ? engine.block.getPlaybackTime(pageId)
+      : 0;
+    const wasPlaying = playbackSupported ? engine.block.isPlaying(pageId) : false;
+    try {
+      if (playbackSupported) {
+        engine.block.setPlaying(pageId, false);
+        engine.block.setPlaybackTime(pageId, Math.max(0, atSeconds));
+      }
+      const crop = buildFaceCropRegion(
+        face,
+        previousClipWidth,
+        previousClipHeight,
+        FACE_CROP_MAX_SIZE
+      );
+      engine.block.setWidth(pageId, crop.size);
+      engine.block.setHeight(pageId, crop.size);
+      engine.block.setPosition(clipId, -crop.x, -crop.y);
+      const exportSizes = [
+        FACE_THUMBNAIL_EXPORT_SIZE,
+        ...FACE_THUMBNAIL_EXPORT_FALLBACKS,
+      ];
+      let blob: Blob | null = null;
+      let lastError: unknown = null;
+      for (const size of exportSizes) {
+        try {
+          blob = await engine.block.generateThumbnailAtTimeOffset(
+            size,
+            Math.max(0, atSeconds)
+          );
+          if (blob?.size) break;
+        } catch (error) {
+          lastError = error;
+        }
+      }
+      if (!blob) {
+        throw lastError instanceof Error
+          ? lastError
+          : new Error("Failed to export face thumbnail.");
+      }
+      if (typeof URL !== "undefined" && typeof URL.createObjectURL === "function") {
+        return URL.createObjectURL(blob);
+      }
+      return await blobToDataUrl(blob);
+    } catch (error) {
+      console.warn("Failed to export face thumbnail", error);
+      return null;
+    } finally {
+      engine.block.setWidth(pageId, previousPageWidth);
+      engine.block.setHeight(pageId, previousPageHeight);
+      engine.block.setSize(clipId, previousClipWidth, previousClipHeight);
+      engine.block.setPosition(clipId, previousClipX, previousClipY);
+      if (playbackSupported) {
+        engine.block.setPlaybackTime(pageId, previousPlaybackTime);
+        engine.block.setPlaying(pageId, wasPlaying);
+      }
+    }
+  };
+
+  const detectFacesForClip = useCallback(
+    async (
+      engine: CreativeEngineInstance,
+      clipId: number
+    ): Promise<FaceBounds[]> => {
+      if (!engine.block.isValid(clipId)) return [];
+      const cached = faceCenterCacheRef.current.get(clipId);
+      if (cached) return cached;
+      const faceapi = faceApiRef.current;
+      if (!faceapi) return [];
+      try {
+        try {
+          const fillId = engine.block.getFill(clipId);
+          if (fillId && engine.block.isValid(fillId)) {
+            await engine.block.forceLoadAVResource(fillId);
+          }
+        } catch (error) {
+          console.warn("Failed to load clip resource for face detection", error);
+        }
+        const duration = engine.block.getDuration(clipId);
+        const samples = new Set<number>();
+        const baseSample = getClipSampleTime(engine, clipId);
+        samples.add(Math.max(0, baseSample));
+        if (Number.isFinite(duration) && duration > 0.2) {
+          samples.add(Math.min(duration * 0.5, Math.max(0, duration - 0.05)));
+          samples.add(Math.min(duration * 0.8, Math.max(0, duration - 0.05)));
+        }
+        let faces: FaceBounds[] = [];
+        for (const sampleTime of samples) {
+          const frame = await grabFrame(engine, clipId, sampleTime);
+          faces = await detectFacesInFrame(faceapi, frame);
+          if (faces.length) break;
+        }
+        faceCenterCacheRef.current.set(clipId, faces);
+        return faces;
+      } catch (error) {
+        console.warn("Failed to detect faces for clip", error);
+        return [];
+      }
+    },
+    []
+  );
+
+  const detectFaceForClip = useCallback(
+    async (
+      engine: CreativeEngineInstance,
+      clipId: number,
+      slotIndex?: number | null,
+      fallbackFace?: FaceBounds | null
+    ) => {
+      if (!engine.block.isValid(clipId)) {
+        return fallbackFace ?? null;
+      }
+      const selectClosestFace = (faces: FaceBounds[], targetCx: number) =>
+        faces.reduce((best, face) => {
+          const bestDistance = Math.abs(best.cx - targetCx);
+          const nextDistance = Math.abs(face.cx - targetCx);
+          return nextDistance < bestDistance ? face : best;
+        }, faces[0]);
+      const selectFace = (
+        faces: FaceBounds[],
+        desiredSlot?: number | null,
+        fallback?: FaceBounds | null
+      ) => {
+        if (!faces.length) return fallback ?? null;
+        const safeSlot =
+          typeof desiredSlot === "number" && Number.isFinite(desiredSlot)
+            ? Math.trunc(desiredSlot)
+            : null;
+        if (safeSlot !== null) {
+          const orderedFaces = faces.slice().sort((a, b) => a.cx - b.cx);
+          if (safeSlot >= 0 && safeSlot < orderedFaces.length) {
+            return orderedFaces[safeSlot];
+          }
+          if (fallback) {
+            return selectClosestFace(orderedFaces, fallback.cx);
+          }
+          const clamped = Math.min(
+            Math.max(safeSlot, 0),
+            orderedFaces.length - 1
+          );
+          return orderedFaces[clamped];
+        }
+        if (fallback) {
+          return selectClosestFace(faces, fallback.cx);
+        }
+        return faces[0];
+      };
+      try {
+        const faces = await detectFacesForClip(engine, clipId);
+        if (!faces.length) return fallbackFace ?? null;
+        return selectFace(faces, slotIndex, fallbackFace);
+      } catch (error) {
+        console.warn("Failed to detect face for clip", error);
+        return fallbackFace ?? null;
+      }
+    },
+    [detectFacesForClip]
+  );
+
   const applyFaceAwareCropping = useCallback(
-    async (clipIds?: number[], ratioOverrideId?: string) => {
+    async (
+      clipIds?: number[],
+      ratioOverrideId?: string,
+      clipSpeakerMap?: Map<number, string | null>,
+      speakerAssignments?: Record<string, number>,
+      speakerFallbackFaces?: Map<string, FaceBounds>
+    ) => {
       const engine = engineRef.current;
       const pageId = pageRef.current;
       const runId = (faceCropRunIdRef.current += 1);
@@ -638,6 +2023,13 @@ export default function App() {
         const sceneWidth = engine.block.getWidth(pageId);
         const sceneHeight = engine.block.getHeight(pageId);
         if (!Number.isFinite(sceneWidth) || !Number.isFinite(sceneHeight)) return;
+        syncVideoLayoutToScene(
+          engine,
+          sceneWidth,
+          sceneHeight,
+          sourceVideoSize.width,
+          sourceVideoSize.height
+        );
         const ids =
           clipIds ??
           (videoTrackRef.current && engine.block.isValid(videoTrackRef.current)
@@ -648,9 +2040,34 @@ export default function App() {
         for (const clipId of ids) {
           if (runId !== faceCropRunIdRef.current) return;
           if (!engine.block.isValid(clipId)) continue;
-          const face = await detectFaceForClip(engine, clipId);
-          if (!face) continue;
-          positionClipForFace(engine, clipId, face.cx, sceneWidth, sceneHeight);
+          const assignedSpeaker = clipSpeakerMap?.get(clipId) ?? null;
+          const assignedSlot =
+            assignedSpeaker && speakerAssignments
+              ? speakerAssignments[assignedSpeaker]
+              : null;
+          const slotIndex =
+            typeof assignedSlot === "number" && Number.isFinite(assignedSlot)
+              ? assignedSlot
+              : null;
+          const fallbackFace = assignedSpeaker
+            ? speakerFallbackFaces?.get(assignedSpeaker) ?? null
+            : null;
+          const face =
+            fallbackFace ??
+            (await detectFaceForClip(engine, clipId, slotIndex));
+          if (runId !== faceCropRunIdRef.current) return;
+          if (!engine.block.isValid(clipId)) continue;
+          if (face) {
+            positionClipForFace(
+              engine,
+              clipId,
+              face.cx,
+              sceneWidth,
+              sceneHeight
+            );
+          } else {
+            positionClipCentered(engine, clipId, sceneWidth, sceneHeight);
+          }
         }
       } finally {
         if (runId === faceCropRunIdRef.current) {
@@ -660,6 +2077,1145 @@ export default function App() {
     },
     [detectFaceForClip, loadFaceModels, sourceVideoSize, targetAspectRatioId]
   );
+
+  const ensureFaceOverlayTrack = useCallback(
+    (engine: CreativeEngineInstance, index: number) => {
+      const pageId = pageRef.current;
+      if (!pageId || !engine.block.isValid(pageId)) return null;
+      const existing = faceOverlayTrackIdsRef.current[index];
+      if (existing && engine.block.isValid(existing)) {
+        return existing;
+      }
+      try {
+        const track = engine.block.create("track");
+        engine.block.appendChild(pageId, track);
+        try {
+          engine.block.setBool(
+            track,
+            "track/automaticallyManageBlockOffsets",
+            false
+          );
+        } catch (error) {
+          console.warn("Failed to configure face overlay track", error);
+        }
+        faceOverlayTrackIdsRef.current[index] = track;
+        return track;
+      } catch (error) {
+        console.warn("Failed to create face overlay track", error);
+        faceOverlayTrackIdsRef.current[index] = 0;
+        return null;
+      }
+    },
+    []
+  );
+
+  const clearFaceOverlays = useCallback(
+    (engineInstance?: CreativeEngineInstance | null) => {
+      const engine = engineInstance ?? engineRef.current;
+      if (!engine) return;
+      faceOverlayIdsRef.current.forEach((blockId) => {
+        if (engine.block.isValid(blockId)) {
+          engine.block.destroy(blockId);
+        }
+      });
+      faceOverlayIdsRef.current = [];
+      if (faceOverlayTrackIdsRef.current.length) {
+        faceOverlayTrackIdsRef.current.forEach((trackId) => {
+          if (engine.block.isValid(trackId)) {
+            engine.block.destroy(trackId);
+          }
+        });
+      }
+      faceOverlayTrackIdsRef.current = [];
+    },
+    []
+  );
+
+  const renderFaceOverlaysForClips = useCallback(
+    async (clipIds: number[], runId: number) => {
+      const engine = engineRef.current;
+      const pageId = pageRef.current;
+      if (!engine || !pageId || !sourceVideoSize) return;
+      clearFaceOverlays(engine);
+      const modelsReady = await loadFaceModels();
+      if (!modelsReady || runId !== faceCropRunIdRef.current) return;
+      let timeOffset = 0;
+      for (const clipId of clipIds) {
+        if (runId !== faceCropRunIdRef.current) return;
+        if (!engine.block.isValid(clipId)) continue;
+        let duration = 0;
+        try {
+          duration = engine.block.getDuration(clipId);
+        } catch (error) {
+          console.warn("Failed to read clip duration for overlays", error);
+        }
+        if (!Number.isFinite(duration) || duration <= 0) {
+          continue;
+        }
+        const assignments = speakerAssignmentsRef.current;
+        const speakerId = clipSpeakerMapRef.current.get(clipId) ?? null;
+        const assignedSlot =
+          speakerId && assignments ? assignments[speakerId] : null;
+        const slotIndex =
+          typeof assignedSlot === "number" && Number.isFinite(assignedSlot)
+            ? assignedSlot
+            : null;
+        const fallbackFace = speakerId
+          ? speakerAssignedThumbnails[speakerId]?.bounds ??
+            (slotIndex !== null ? speakerFaceSlots[speakerId]?.[slotIndex] : null) ??
+            null
+          : null;
+        const face = await detectFaceForClip(
+          engine,
+          clipId,
+          slotIndex,
+          fallbackFace
+        );
+        if (runId !== faceCropRunIdRef.current) return;
+        if (!face) {
+          timeOffset += duration;
+          continue;
+        }
+        const trackId = ensureFaceOverlayTrack(engine, 0);
+        if (!trackId) {
+          timeOffset += duration;
+          continue;
+        }
+        const color = FACE_OVERLAY_COLORS[0];
+        let blockWidth = 0;
+        let blockHeight = 0;
+        let blockX = 0;
+        let blockY = 0;
+        try {
+          blockWidth = engine.block.getWidth(clipId);
+          blockHeight = engine.block.getHeight(clipId);
+          blockX = engine.block.getPositionX(clipId);
+          blockY = engine.block.getPositionY(clipId);
+        } catch (error) {
+          console.warn("Failed to read clip layout for overlays", error);
+        }
+        if (
+          !Number.isFinite(blockWidth) ||
+          !Number.isFinite(blockHeight) ||
+          blockWidth <= 0 ||
+          blockHeight <= 0
+        ) {
+          timeOffset += duration;
+          continue;
+        }
+        const minDimension = Math.min(blockWidth, blockHeight);
+        const fallbackSize = Math.max(1, minDimension * FACE_CROP_MIN_RATIO);
+        const rawWidth = (face.x1 - face.x0) * blockWidth;
+        const rawHeight = (face.y1 - face.y0) * blockHeight;
+        const hasBounds =
+          Number.isFinite(rawWidth) &&
+          Number.isFinite(rawHeight) &&
+          rawWidth > 1 &&
+          rawHeight > 1;
+        const baseWidth = hasBounds ? rawWidth : fallbackSize;
+        const baseHeight = hasBounds ? rawHeight : fallbackSize;
+        const width = Math.max(
+          1,
+          baseWidth * FACE_CROP_RECT_SCALE + FACE_CROP_RECT_EXTRA_WIDTH
+        );
+        const height = Math.max(
+          1,
+          baseHeight * FACE_CROP_RECT_SCALE + FACE_CROP_RECT_EXTRA_HEIGHT
+        );
+        const centerX = clampValue(face.cx, 0, 1) * blockWidth;
+        const centerY = clampValue(face.cy, 0, 1) * blockHeight;
+        const biasShift =
+          (FACE_CROP_RECT_TOP_BIAS - 0.5) * FACE_CROP_RECT_EXTRA_HEIGHT;
+        const rawX = centerX - width / 2;
+        const rawY = centerY - height / 2 - biasShift;
+        const maxX = Math.max(0, blockWidth - width);
+        const maxY = Math.max(0, blockHeight - height);
+        const posX = blockX + clampValue(rawX, 0, maxX);
+        const posY = blockY + clampValue(rawY, 0, maxY);
+
+        let overlayId = 0;
+        try {
+          overlayId = engine.block.create("graphic");
+          engine.block.setShape(overlayId, engine.block.createShape("rect"));
+          const fillId = engine.block.createFill("color");
+          engine.block.setFill(overlayId, fillId);
+          engine.block.setColor(fillId, "fill/color/value", color);
+          engine.block.setSize(overlayId, width, height);
+          engine.block.setPosition(overlayId, posX, posY);
+          engine.block.setDuration(overlayId, duration);
+          if (engine.block.supportsTimeOffset(overlayId)) {
+            engine.block.setTimeOffset(overlayId, timeOffset);
+          }
+          engine.block.appendChild(trackId, overlayId);
+          engine.block.setBool(overlayId, "includedInExport", false);
+          engine.block.setBool(overlayId, "selectionEnabled", false);
+          engine.block.setBool(overlayId, "transformLocked", true);
+          try {
+            if (engine.block.supportsStroke(overlayId)) {
+              engine.block.setStrokeEnabled(overlayId, true);
+              engine.block.setStrokeWidth(overlayId, 2);
+              engine.block.setStrokeColor(overlayId, {
+                r: color.r,
+                g: color.g,
+                b: color.b,
+                a: 0.7,
+              });
+            }
+          } catch (error) {
+            console.warn("Failed to style overlay stroke", error);
+          }
+          try {
+            engine.block.setAlwaysOnTop(overlayId, true);
+          } catch (error) {
+            console.warn("Failed to pin overlay on top", error);
+          }
+          disableBlockHighlight(engine, overlayId);
+          faceOverlayIdsRef.current.push(overlayId);
+        } catch (error) {
+          console.warn("Failed to create face overlay", error);
+          if (overlayId && engine.block.isValid(overlayId)) {
+            engine.block.destroy(overlayId);
+          }
+        }
+        timeOffset += duration;
+      }
+    },
+    [
+      clearFaceOverlays,
+      detectFacesForClip,
+      disableBlockHighlight,
+      ensureFaceOverlayTrack,
+      loadFaceModels,
+      speakerAssignedThumbnails,
+      primaryFaceSlots,
+      speakerFaceSlots,
+      sourceVideoSize,
+    ]
+  );
+
+  const applySoloFaceCropping = useCallback(
+    async (clipIds?: number[]) => {
+      const engine = engineRef.current;
+      const pageId = pageRef.current;
+      const runId = (faceCropRunIdRef.current += 1);
+      if (!engine || !pageId || !sourceVideoSize) {
+        setIsFaceCropPending(false);
+        return;
+      }
+      setIsFaceCropPending(true);
+      try {
+        const modelsReady = await loadFaceModels();
+        if (!modelsReady || runId !== faceCropRunIdRef.current) return;
+        const ids =
+          clipIds ??
+          (videoTrackRef.current && engine.block.isValid(videoTrackRef.current)
+            ? engine.block.getChildren(videoTrackRef.current) ?? []
+            : baseClipIdsRef.current);
+        const assignments = speakerAssignmentsRef.current;
+        const fallbackSlotFaces = new Map<number, FaceBounds>();
+        Object.values(speakerAssignedThumbnails).forEach((thumb) => {
+          if (Number.isFinite(thumb.slotIndex)) {
+            fallbackSlotFaces.set(thumb.slotIndex, thumb.bounds);
+          }
+        });
+        primaryFaceSlots.forEach((face, index) => {
+          if (!fallbackSlotFaces.has(index)) {
+            fallbackSlotFaces.set(index, face);
+          }
+        });
+        const fallbackFaces = new Map<string, FaceBounds>();
+        Object.entries(assignments).forEach(([speakerId, slotIndex]) => {
+          if (typeof slotIndex !== "number" || !Number.isFinite(slotIndex)) {
+            return;
+          }
+          const face =
+            fallbackSlotFaces.get(slotIndex) ??
+            speakerFaceSlots[speakerId]?.[slotIndex] ??
+            null;
+          if (face) {
+            fallbackFaces.set(speakerId, face);
+          }
+        });
+        await renderFaceOverlaysForClips(ids, runId);
+        for (const clipId of ids) {
+          if (runId !== faceCropRunIdRef.current) return;
+          if (!engine.block.isValid(clipId)) continue;
+          let shapeId: number | null = null;
+          try {
+            engine.block.setClipped(clipId, true);
+          } catch (error) {
+            console.warn("Failed to enable clipping on solo clip", error);
+          }
+          try {
+            if (engine.block.supportsShape(clipId)) {
+              shapeId = engine.block.createShape("rect");
+              engine.block.setShape(clipId, shapeId);
+            }
+          } catch (error) {
+            console.warn("Failed to ensure solo clip shape", error);
+          }
+          if (runId !== faceCropRunIdRef.current) return;
+          if (!engine.block.isValid(clipId)) continue;
+          try {
+            if (engine.block.supportsContentFillMode(clipId)) {
+              engine.block.setContentFillMode(clipId, "Crop");
+            }
+          } catch (error) {
+            console.warn("Failed to set solo clip fill mode", error);
+          }
+          try {
+            const fillId = engine.block.getFill(clipId);
+            if (
+              fillId &&
+              engine.block.isValid(fillId) &&
+              engine.block.supportsContentFillMode(fillId)
+            ) {
+              engine.block.setContentFillMode(fillId, "Crop");
+            }
+          } catch (error) {
+            console.warn("Failed to set solo fill mode", error);
+          }
+          try {
+            engine.block.resetCrop(clipId);
+            const fillId = engine.block.getFill(clipId);
+            if (fillId && engine.block.isValid(fillId)) {
+              engine.block.resetCrop(fillId);
+            }
+          } catch (error) {
+            console.warn("Failed to reset solo crop before detection", error);
+          }
+          const speakerId = clipSpeakerMapRef.current.get(clipId) ?? null;
+          const assignedSlot =
+            speakerId && assignments ? assignments[speakerId] : null;
+          const slotIndex =
+            typeof assignedSlot === "number" && Number.isFinite(assignedSlot)
+              ? assignedSlot
+              : null;
+          const fallbackFace = speakerId
+            ? fallbackFaces.get(speakerId) ?? null
+            : null;
+          const face = await detectFaceForClip(
+            engine,
+            clipId,
+            slotIndex,
+            fallbackFace
+          );
+          if (runId !== faceCropRunIdRef.current) return;
+          if (!engine.block.isValid(clipId)) continue;
+          if (face) {
+            let blockWidth = 0;
+            let blockHeight = 0;
+            try {
+              blockWidth = engine.block.getWidth(clipId);
+              blockHeight = engine.block.getHeight(clipId);
+            } catch (error) {
+              console.warn("Failed to read clip size for solo crop", error);
+            }
+            if (
+              Number.isFinite(blockWidth) &&
+              Number.isFinite(blockHeight) &&
+              blockWidth > 0 &&
+              blockHeight > 0
+            ) {
+              const cropRect = scaleCropRect(
+                buildFacePixelCropRect(face, blockWidth, blockHeight),
+                FACE_CROP_RECT_SCALE,
+                blockWidth,
+                blockHeight,
+                FACE_CROP_RECT_EXTRA_WIDTH,
+                FACE_CROP_RECT_EXTRA_HEIGHT,
+                FACE_CROP_RECT_TOP_BIAS
+              );
+              const radius = clampValue(
+                Math.min(cropRect.width, cropRect.height) *
+                  FACE_CROP_CORNER_RADIUS_RATIO,
+                FACE_CROP_CORNER_RADIUS_MIN,
+                FACE_CROP_CORNER_RADIUS_MAX
+              );
+              const applied = applyRectCropScaleTranslation(
+                engine,
+                clipId,
+                cropRect,
+                { resizeToCrop: true }
+              );
+              if (shapeId || radius) {
+                applyRoundedCorners(engine, shapeId ?? 0, clipId, radius);
+              }
+              if (!applied) {
+                try {
+                  engine.block.resetCrop(clipId);
+                } catch (error) {
+                  console.warn("Failed to reset solo crop state", error);
+                }
+              }
+            }
+          } else {
+            try {
+              engine.block.resetCrop(clipId);
+              const fillId = engine.block.getFill(clipId);
+              if (fillId && engine.block.isValid(fillId)) {
+                engine.block.resetCrop(fillId);
+              }
+            } catch (error) {
+              console.warn("Failed to reset solo crop state", error);
+            }
+          }
+        }
+      } finally {
+        if (runId === faceCropRunIdRef.current) {
+          setIsFaceCropPending(false);
+        }
+      }
+    },
+    [
+      detectFaceForClip,
+      loadFaceModels,
+      primaryFaceSlots,
+      renderFaceOverlaysForClips,
+      speakerAssignedThumbnails,
+      speakerFaceSlots,
+      sourceVideoSize,
+    ]
+  );
+
+  const setBaseClipVisibility = (
+    engine: CreativeEngineInstance,
+    visible: boolean
+  ) => {
+    baseClipIdsRef.current.forEach((clipId) => {
+      if (!engine.block.isValid(clipId)) return;
+      try {
+        engine.block.setVisible(clipId, visible);
+      } catch (error) {
+        console.warn("Failed to toggle clip visibility", error);
+      }
+    });
+  };
+
+  const clearTemplateLayout = useCallback(
+    (
+      engineInstance?: CreativeEngineInstance | null,
+      options?: { showBase?: boolean; restoreTrack?: boolean }
+    ) => {
+      const engine = engineInstance ?? engineRef.current;
+      if (!engine) return;
+      clearFaceOverlays(engine);
+      templateClipIdsRef.current.forEach((clipId) => {
+        if (engine.block.isValid(clipId)) {
+          engine.block.destroy(clipId);
+        }
+      });
+      templateClipIdsRef.current = [];
+      templateGroupIdsRef.current.forEach((groupId) => {
+        if (engine.block.isValid(groupId)) {
+          engine.block.destroy(groupId);
+        }
+      });
+      templateGroupIdsRef.current = [];
+      if (options?.showBase ?? true) {
+        setBaseClipVisibility(engine, true);
+      }
+      const shouldRestoreTrack = options?.restoreTrack ?? true;
+      const pageId = pageRef.current;
+      const trackId = videoTrackRef.current;
+      if (
+        shouldRestoreTrack &&
+        trackId &&
+        engine.block.isValid(trackId)
+      ) {
+        setVideoTrackAutoManage(engine, trackId, true);
+        if (pageId && engine.block.isValid(pageId)) {
+          try {
+            engine.block.setDuration(trackId, engine.block.getDuration(pageId));
+          } catch (error) {
+            console.warn("Failed to reset track duration", error);
+          }
+        }
+      }
+    },
+    [clearFaceOverlays]
+  );
+
+  const resolveSpeakerFaces = (
+    speakerIds: string[],
+    assignments: Record<string, number>
+  ) => {
+    const fallback = primaryFaceSlots;
+    const assignmentMap = buildSpeakerAssignments(
+      assignments,
+      speakerFaceSlots,
+      fallback
+    );
+    const resolved = new Map<string, FaceBounds>();
+    speakerIds.forEach((speakerId) => {
+      const assignment = assignmentMap.get(speakerId);
+      if (assignment) {
+        resolved.set(speakerId, assignment);
+        return;
+      }
+      const candidate = speakerFaceSlots[speakerId]?.[0] ?? fallback[0];
+      if (candidate) {
+        resolved.set(speakerId, candidate);
+      }
+    });
+    return resolved;
+  };
+
+  const resolveTemplateFaces = (
+    speakerIds: string[],
+    assignments: Record<string, number>
+  ) => {
+    const resolved = new Map<string, FaceBounds>();
+    const slotFaces = new Map<number, FaceBounds>();
+    Object.values(speakerAssignedThumbnails).forEach((thumb) => {
+      if (Number.isFinite(thumb.slotIndex)) {
+        slotFaces.set(thumb.slotIndex, thumb.bounds);
+      }
+    });
+    primaryFaceSlots.forEach((face, index) => {
+      if (!slotFaces.has(index)) {
+        slotFaces.set(index, face);
+      }
+    });
+    speakerIds.forEach((speakerId) => {
+      const slotIndex = assignments[speakerId];
+      if (typeof slotIndex !== "number" || !Number.isFinite(slotIndex)) return;
+      const resolvedSlot =
+        slotFaces.get(slotIndex) ??
+        speakerFaceSlots[speakerId]?.[slotIndex] ??
+        null;
+      if (resolvedSlot) {
+        resolved.set(speakerId, resolvedSlot);
+      }
+    });
+    return resolved;
+  };
+
+  const getTemplateSpeakerIds = (assignments: Record<string, number>) => {
+    const ordered = speakerSnippetsRef.current.map((snippet) => snippet.id);
+    const assignedIds = Object.keys(assignments);
+    if (!assignedIds.length) return ordered;
+    const extras = assignedIds.filter((id) => !ordered.includes(id));
+    return ordered.concat(extras);
+  };
+
+  const canApplySpeakerTemplate = () => {
+    const speakers = speakerSnippetsRef.current;
+    if (speakers.length < 2) return false;
+    const uniqueSlots = new Set(
+      Object.values(speakerAssignmentsRef.current).filter(
+        (slot) => typeof slot === "number" && Number.isFinite(slot)
+      )
+    );
+    return uniqueSlots.size > 1;
+  };
+
+  const applySpeakerTemplate = useCallback(
+    async (templateId: SpeakerTemplateId) => {
+      const engine = engineRef.current;
+      const pageId = pageRef.current;
+      if (!engine || !pageId || !sourceVideoSize) return;
+      if (templateId === "none") return;
+      const assignments = speakerAssignmentsRef.current;
+      const speakerIds = getTemplateSpeakerIds(assignments);
+      if (speakerIds.length < 2) return;
+      const uniqueSlots = new Set(
+        Object.values(assignments).filter(
+          (slot) => typeof slot === "number" && Number.isFinite(slot)
+        )
+      );
+      if (uniqueSlots.size < 2) return;
+      const clipRanges = clipRangesRef.current;
+      const baseClipIds = baseClipIdsRef.current;
+      if (!clipRanges.length || !baseClipIds.length) return;
+
+      const templateSource =
+        (videoTemplateRef.current &&
+          engine.block.isValid(videoTemplateRef.current) &&
+          videoTemplateRef.current) ||
+        (baseClipIds[0] && engine.block.isValid(baseClipIds[0])
+          ? baseClipIds[0]
+          : null);
+      if (!templateSource) return;
+
+      clearTemplateLayout(engine, { showBase: true });
+
+      const sceneWidth = engine.block.getWidth(pageId);
+      const sceneHeight = engine.block.getHeight(pageId);
+      if (!Number.isFinite(sceneWidth) || !Number.isFinite(sceneHeight)) return;
+      const layout = buildTemplateLayout(
+        templateId,
+        sceneWidth,
+        sceneHeight,
+        speakerIds.length
+      );
+      const faceMap = resolveTemplateFaces(speakerIds, assignments);
+      const normalizedFaceSize = computeNormalizedFaceSize(
+        Array.from(faceMap.values()),
+        sourceVideoSize.width,
+        sourceVideoSize.height
+      );
+      const totalDuration = clipRanges.reduce(
+        (sum, range) => sum + (range.end - range.start),
+        0
+      );
+      const createTemplateTrack = () => {
+        let trackId: number;
+        try {
+          trackId = engine.block.create("track");
+        } catch (error) {
+          console.warn("Failed to create template track", error);
+          return null;
+        }
+        engine.block.appendChild(pageId, trackId);
+        setVideoTrackAutoManage(engine, trackId, true);
+        if (Number.isFinite(totalDuration) && totalDuration > 0) {
+          try {
+            engine.block.setDuration(trackId, totalDuration);
+          } catch (error) {
+            console.warn("Failed to set template track duration", error);
+          }
+        }
+        templateGroupIdsRef.current.push(trackId);
+        return trackId;
+      };
+      const activeTrack = createTemplateTrack();
+      if (!activeTrack) return;
+      const thumbTracks = layout.thumbs
+        .map(() => createTemplateTrack())
+        .filter((trackId): trackId is number => typeof trackId === "number");
+      if (thumbTracks.length !== layout.thumbs.length) {
+        clearTemplateLayout(engine);
+        return;
+      }
+      const slotTracks = [activeTrack, ...thumbTracks];
+      const slotLayouts = [layout.active, ...layout.thumbs];
+
+      if (templateId === "multi") {
+        const trackBySpeaker = new Map<string, number>();
+        speakerIds.forEach((speakerId, index) => {
+          const trackId = index === 0 ? activeTrack : thumbTracks[index - 1];
+          if (trackId) {
+            trackBySpeaker.set(speakerId, trackId);
+          }
+        });
+        if (trackBySpeaker.size !== speakerIds.length) {
+          clearTemplateLayout(engine);
+          return;
+        }
+        let createdClips = 0;
+        for (let index = 0; index < clipRanges.length; index += 1) {
+          const range = clipRanges[index];
+          const duration = range.end - range.start;
+          if (!Number.isFinite(duration) || duration <= 0.01) continue;
+          const baseClipId = baseClipIds[index];
+          const activeSpeakerId =
+            (baseClipId &&
+              clipSpeakerMapRef.current.get(baseClipId)) ||
+            speakerIds[0] ||
+            null;
+          const resolvedActiveSpeakerId =
+            activeSpeakerId && speakerIds.includes(activeSpeakerId)
+              ? activeSpeakerId
+              : speakerIds[0] ?? null;
+          if (!resolvedActiveSpeakerId) continue;
+          const orderedThumbs = speakerIds.filter(
+            (speakerId) => speakerId !== resolvedActiveSpeakerId
+          );
+          const slotSpeakerIds = [resolvedActiveSpeakerId, ...orderedThumbs];
+
+          for (const speakerId of speakerIds) {
+            const trackId = trackBySpeaker.get(speakerId);
+            if (!trackId) continue;
+            const slotIndex = slotSpeakerIds.indexOf(speakerId);
+            const slot = slotLayouts[slotIndex];
+            if (!slot) continue;
+
+            let clip: number;
+            try {
+              clip = engine.block.duplicate(templateSource, false);
+            } catch (error) {
+              console.warn("Failed to duplicate template clip", error);
+              continue;
+            }
+            disableBlockHighlight(engine, clip);
+            const parent = engine.block.getParent(clip);
+            if (parent && engine.block.isValid(parent)) {
+              try {
+                engine.block.removeChild(parent, clip);
+              } catch (detachError) {
+                console.warn("Failed to detach duplicated clip", detachError);
+              }
+            }
+            const clipFill = engine.block.getFill(clip);
+            if (clipFill) {
+              engine.block.setTrimOffset(clipFill, range.start);
+              engine.block.setTrimLength(clipFill, duration);
+            }
+            engine.block.setDuration(clip, duration);
+
+            try {
+              engine.block.setClipped(clip, true);
+            } catch (error) {
+              console.warn("Failed to enable clip cropping", error);
+            }
+            let shapeId: number | null = null;
+            try {
+              if (engine.block.supportsShape(clip)) {
+                shapeId = engine.block.createShape("rect");
+                engine.block.setShape(clip, shapeId);
+              }
+            } catch (error) {
+              console.warn("Failed to set template clip shape", error);
+            }
+            try {
+              if (engine.block.supportsContentFillMode(clip)) {
+                engine.block.setContentFillMode(clip, "Crop");
+              }
+              if (clipFill && engine.block.supportsContentFillMode(clipFill)) {
+                engine.block.setContentFillMode(clipFill, "Crop");
+              }
+            } catch (error) {
+              console.warn("Failed to set content fill mode", error);
+            }
+
+            const face = faceMap.get(speakerId);
+            const assignedSlotIndex = assignments[speakerId];
+            const slotIndexHint =
+              typeof assignedSlotIndex === "number" &&
+              Number.isFinite(assignedSlotIndex)
+                ? assignedSlotIndex
+                : null;
+            let resolvedFace = face ?? null;
+            if (
+              baseClipId &&
+              engine.block.isValid(baseClipId) &&
+              slotIndexHint !== null
+            ) {
+              resolvedFace = await detectFaceForClip(
+                engine,
+                baseClipId,
+                slotIndexHint,
+                resolvedFace
+              );
+            }
+            if (resolvedFace) {
+              let sourceWidth = 0;
+              let sourceHeight = 0;
+              try {
+                sourceWidth = engine.block.getWidth(clip);
+                sourceHeight = engine.block.getHeight(clip);
+              } catch (error) {
+                console.warn("Failed to read template clip size", error);
+              }
+              const cropRect = scaleCropRect(
+                buildFacePixelCropRect(
+                  resolvedFace,
+                  sourceWidth,
+                  sourceHeight
+                ),
+                FACE_CROP_RECT_SCALE,
+                sourceWidth,
+                sourceHeight,
+                FACE_CROP_RECT_EXTRA_WIDTH,
+                FACE_CROP_RECT_EXTRA_HEIGHT,
+                FACE_CROP_RECT_TOP_BIAS
+              );
+              const applied = applyRectCropScaleTranslation(
+                engine,
+                clip,
+                cropRect,
+                { resizeToCrop: true }
+              );
+              const radius = clampValue(
+                Math.min(slot.width, slot.height) *
+                  FACE_CROP_CORNER_RADIUS_RATIO,
+                FACE_CROP_CORNER_RADIUS_MIN,
+                FACE_CROP_CORNER_RADIUS_MAX
+              );
+              if (shapeId || radius) {
+                applyRoundedCorners(engine, shapeId ?? 0, clip, radius);
+              }
+              if (!applied) {
+                try {
+                  engine.block.resetCrop(clip);
+                } catch (error) {
+                  console.warn("Failed to reset template crop", error);
+                }
+              }
+            } else {
+              try {
+                engine.block.resetCrop(clip);
+              } catch (error) {
+                console.warn("Failed to reset template crop", error);
+              }
+            }
+
+            let clipWidth = 0;
+            let clipHeight = 0;
+            try {
+              clipWidth = engine.block.getWidth(clip);
+              clipHeight = engine.block.getHeight(clip);
+            } catch (error) {
+              console.warn("Failed to read cropped clip size", error);
+            }
+            if (
+              Number.isFinite(clipWidth) &&
+              Number.isFinite(clipHeight) &&
+              clipWidth > 0 &&
+              clipHeight > 0 &&
+              Number.isFinite(slot.width) &&
+              Number.isFinite(slot.height) &&
+              slot.width > 0 &&
+              slot.height > 0
+            ) {
+              const scale = Math.min(
+                slot.width / clipWidth,
+                slot.height / clipHeight
+              );
+              const scaledWidth = clipWidth * scale;
+              const scaledHeight = clipHeight * scale;
+              const posX = slot.x + (slot.width - scaledWidth) / 2;
+              const posY = slot.y + (slot.height - scaledHeight) / 2;
+              try {
+                engine.block.setSize(clip, scaledWidth, scaledHeight);
+                engine.block.setPosition(clip, posX, posY);
+              } catch (error) {
+                console.warn("Failed to position template clip", error);
+              }
+            }
+
+            engine.block.appendChild(trackId, clip);
+            templateClipIdsRef.current.push(clip);
+            if (createdClips === 0) {
+              setBaseClipVisibility(engine, false);
+            }
+            createdClips += 1;
+          }
+        }
+
+        if (createdClips === 0) {
+          clearTemplateLayout(engine);
+        }
+        return;
+      }
+
+      let createdClips = 0;
+      for (let index = 0; index < clipRanges.length; index += 1) {
+        const range = clipRanges[index];
+        const duration = range.end - range.start;
+        if (!Number.isFinite(duration) || duration <= 0.01) continue;
+        const baseClipId = baseClipIds[index];
+        const activeSpeakerId =
+          (baseClipId &&
+            clipSpeakerMapRef.current.get(baseClipId)) ||
+          speakerIds[0] ||
+          null;
+        const resolvedActiveSpeakerId =
+          activeSpeakerId && speakerIds.includes(activeSpeakerId)
+            ? activeSpeakerId
+            : speakerIds[0] ?? null;
+        if (!resolvedActiveSpeakerId) continue;
+        const thumbSpeakerIds = speakerIds.filter(
+          (speakerId) => speakerId !== resolvedActiveSpeakerId
+        );
+        const slotSpeakerIds = [resolvedActiveSpeakerId, ...thumbSpeakerIds];
+
+        for (let slotIndex = 0; slotIndex < slotTracks.length; slotIndex += 1) {
+          const trackId = slotTracks[slotIndex];
+          const slot = slotLayouts[slotIndex];
+          const speakerId = slotSpeakerIds[slotIndex] ?? null;
+          if (!slot) continue;
+          if (!speakerId) continue;
+
+          let clip: number;
+          try {
+            clip = engine.block.duplicate(templateSource, false);
+          } catch (error) {
+            console.warn("Failed to duplicate template clip", error);
+            continue;
+          }
+          disableBlockHighlight(engine, clip);
+          const parent = engine.block.getParent(clip);
+          if (parent && engine.block.isValid(parent)) {
+            try {
+              engine.block.removeChild(parent, clip);
+            } catch (detachError) {
+              console.warn("Failed to detach duplicated clip", detachError);
+            }
+          }
+          const clipFill = engine.block.getFill(clip);
+          if (clipFill) {
+            engine.block.setTrimOffset(clipFill, range.start);
+            engine.block.setTrimLength(clipFill, duration);
+          }
+          engine.block.setDuration(clip, duration);
+
+          engine.block.setSize(clip, slot.width, slot.height);
+          engine.block.setPosition(clip, slot.x, slot.y);
+          try {
+            engine.block.setClipped(clip, true);
+          } catch (error) {
+            console.warn("Failed to enable clip cropping", error);
+          }
+          try {
+            if (engine.block.supportsContentFillMode(clip)) {
+              engine.block.setContentFillMode(clip, "Cover");
+            }
+          } catch (error) {
+            console.warn("Failed to set content fill mode", error);
+          }
+
+          const face = faceMap.get(speakerId);
+          const assignedSlotIndex = assignments[speakerId];
+          const slotIndexHint =
+            typeof assignedSlotIndex === "number" && Number.isFinite(assignedSlotIndex)
+              ? assignedSlotIndex
+              : null;
+          let resolvedFace = face ?? null;
+          if (
+            baseClipId &&
+            engine.block.isValid(baseClipId) &&
+            slotIndexHint !== null
+          ) {
+            resolvedFace = await detectFaceForClip(
+              engine,
+              baseClipId,
+              slotIndexHint,
+              resolvedFace
+            );
+          }
+          if (resolvedFace) {
+            const targetAspect =
+              slot.width > 0 && slot.height > 0
+                ? slot.width / slot.height
+                : 1;
+            const crop = buildFaceCropRect(
+              resolvedFace,
+              sourceVideoSize.width,
+              sourceVideoSize.height,
+              targetAspect,
+              normalizedFaceSize
+            );
+            const normalizedCrop = normalizeCropRect(
+              crop,
+              sourceVideoSize.width,
+              sourceVideoSize.height
+            );
+            if (
+              !normalizedCrop ||
+              !applyNormalizedCrop(engine, clip, normalizedCrop)
+            ) {
+              const baseScale = Math.max(
+                slot.width / sourceVideoSize.width,
+                slot.height / sourceVideoSize.height
+              );
+              const desiredScale =
+                crop.width > 0 ? slot.width / crop.width : baseScale;
+              const scaleRatio =
+                baseScale > 0 ? desiredScale / baseScale : 1;
+              const safeScale = Math.max(1, scaleRatio);
+              const contentWidth =
+                sourceVideoSize.width * baseScale * safeScale;
+              const contentHeight =
+                sourceVideoSize.height * baseScale * safeScale;
+            const faceCx = resolvedFace.cx * sourceVideoSize.width;
+            const faceCy = resolvedFace.cy * sourceVideoSize.height;
+            const translateX =
+              (baseScale * safeScale * (sourceVideoSize.width / 2 - faceCx)) /
+              slot.width;
+            const translateY =
+              (baseScale * safeScale * (sourceVideoSize.height / 2 - faceCy)) /
+              slot.height;
+              const maxShiftX = Math.max(
+                0,
+                (contentWidth - slot.width) / (2 * slot.width)
+              );
+              const maxShiftY = Math.max(
+                0,
+                (contentHeight - slot.height) / (2 * slot.height)
+              );
+              if (engine.block.supportsCrop(clip)) {
+                try {
+                  engine.block.resetCrop(clip);
+                  engine.block.setCropScaleRatio(clip, safeScale);
+                  engine.block.setCropTranslationX(
+                    clip,
+                    clampValue(translateX, -maxShiftX, maxShiftX)
+                  );
+                  engine.block.setCropTranslationY(
+                    clip,
+                    clampValue(translateY, -maxShiftY, maxShiftY)
+                  );
+                } catch (cropError) {
+                  console.warn("Failed to apply face crop to clip", cropError);
+                }
+              }
+            }
+          } else if (engine.block.supportsCrop(clip)) {
+            try {
+              const fullCrop = applyNormalizedCrop(engine, clip, {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+              });
+              if (!fullCrop) {
+                engine.block.resetCrop(clip);
+              }
+            } catch (cropError) {
+              console.warn("Failed to reset crop", cropError);
+            }
+          }
+
+          engine.block.appendChild(trackId, clip);
+          templateClipIdsRef.current.push(clip);
+          if (createdClips === 0) {
+            setBaseClipVisibility(engine, false);
+          }
+          createdClips += 1;
+        }
+      }
+
+      if (createdClips === 0) {
+        clearTemplateLayout(engine);
+      }
+    },
+    [
+      clearTemplateLayout,
+      disableBlockHighlight,
+      primaryFaceSlots,
+      speakerFaceSlots,
+      sourceVideoSize,
+    ]
+  );
+
+  const preloadSpeakerFaces = async (snippets: SpeakerSnippet[]) => {
+    const engine = engineRef.current;
+    const pageId = pageRef.current;
+    if (!engine || !pageId || !snippets.length) return null;
+    const clipId = getPrimaryVideoBlock(engine);
+    if (!clipId) return null;
+
+    const runId = preloadRunIdRef.current;
+    const faceSlotsBySpeaker: Record<string, FaceBounds[]> = {};
+    const thumbnails: SpeakerFaceThumbnail[] = [];
+    const cleanupThumbnails = () => revokeSpeakerThumbnailUrls(thumbnails);
+    let primarySpeakerId: string | null = null;
+    let maxFaces = 0;
+    console.info("[Speaker Debug] Preload faces start", {
+      speakers: snippets.map((snippet) => snippet.id),
+    });
+
+    const modelsReady = await loadFaceModels();
+    if (!modelsReady || runId !== preloadRunIdRef.current) {
+      cleanupThumbnails();
+      return null;
+    }
+    const faceapi = faceApiRef.current;
+    if (!faceapi) {
+      cleanupThumbnails();
+      return null;
+    }
+
+    const clipFill = engine.block.getFill(clipId);
+    if (clipFill) {
+      try {
+        await engine.block.forceLoadAVResource(clipFill);
+      } catch (error) {
+        console.warn("Failed to preload video resource for thumbnails", error);
+      }
+    }
+
+    for (const snippet of snippets) {
+      if (runId !== preloadRunIdRef.current) {
+        cleanupThumbnails();
+        return null;
+      }
+      let faces: FaceBounds[] = [];
+      const sampleTimes: number[] = [];
+      if (Number.isFinite(snippet.start)) {
+        sampleTimes.push(snippet.start);
+      }
+      const midpoint =
+        Number.isFinite(snippet.start) && Number.isFinite(snippet.end)
+          ? (snippet.start + snippet.end) / 2
+          : snippet.start + 0.5;
+      if (
+        Number.isFinite(midpoint) &&
+        Math.abs(midpoint - snippet.start) > 0.05
+      ) {
+        sampleTimes.push(midpoint);
+      }
+      if (!sampleTimes.length) {
+        sampleTimes.push(0);
+      }
+      for (let i = 0; i < sampleTimes.length; i += 1) {
+        try {
+          const frame = await grabFrame(engine, clipId, sampleTimes[i]);
+          faces = await detectFacesInFrame(faceapi, frame);
+          if (faces.length) break;
+        } catch (error) {
+          console.warn("Failed to sample speaker frame for faces", error);
+        }
+      }
+      const orderedFaces = faces.slice().sort((a, b) => a.cx - b.cx);
+      console.info("[Speaker Debug] Faces detected", {
+        speakerId: snippet.id,
+        label: snippet.label,
+        start: snippet.start,
+        end: snippet.end,
+        faces: orderedFaces.length,
+      });
+      faceSlotsBySpeaker[snippet.id] = orderedFaces;
+      if (orderedFaces.length > maxFaces) {
+        maxFaces = orderedFaces.length;
+        primarySpeakerId = snippet.id;
+      }
+      for (const [faceIndex, face] of orderedFaces.entries()) {
+        if (runId !== preloadRunIdRef.current) {
+          cleanupThumbnails();
+          return null;
+        }
+        const src = await exportFaceThumbnail(
+          engine,
+          pageId,
+          clipId,
+          snippet.start,
+          face
+        );
+        if (!src) continue;
+        thumbnails.push({
+          id: `${snippet.id}-${faceIndex}-${snippet.start}`,
+          speakerId: snippet.id,
+          speakerLabel: snippet.label,
+          start: snippet.start,
+          end: snippet.end,
+          slotIndex: faceIndex,
+          bounds: face,
+          src,
+        });
+      }
+    }
+
+    const thumbnailCounts = thumbnails.reduce<Record<string, number>>(
+      (acc, thumb) => {
+        acc[thumb.speakerId] = (acc[thumb.speakerId] ?? 0) + 1;
+        return acc;
+      },
+      {}
+    );
+    console.info("[Speaker Debug] Preload faces summary", {
+      primarySpeakerId,
+      thumbnailCounts,
+    });
+    return {
+      faceSlotsBySpeaker,
+      thumbnails,
+      primarySpeakerId,
+      maxFaces,
+    };
+  };
 
   useEffect(() => {
     let rafId: number;
@@ -730,6 +3286,7 @@ export default function App() {
 
     setVideoFile(file);
     resetWorkflowState();
+    resetPreloadState();
     setTimelinePosition(0);
     setIsPlaying(false);
     setTimelineSegments([]);
@@ -745,8 +3302,12 @@ export default function App() {
     setTextHookEnabled(true);
     setTranscriptDebug(null);
     setGeminiDebug(null);
+    setGeminiFaceDebug(null);
+    setGeminiFaceThumbnail(null);
+    setDebugExportMetrics(null);
     setCaptionDebug(null);
     setIsDebugOpen(false);
+    setIsFaceDebugLoading(false);
     setProgress(0);
     setIsExporting(false);
     setExportError(null);
@@ -957,12 +3518,628 @@ export default function App() {
     }
   };
 
+  const handleGeminiFaceDebug = async () => {
+    if (isFaceDebugLoading) return;
+    console.log("[Gemini Face Debug] Starting thumbnail export");
+    const engine = engineRef.current;
+    if (!engine) {
+      setGeminiFaceDebug(
+        JSON.stringify({ error: "Creative engine is not ready." }, null, 2)
+      );
+      setGeminiFaceThumbnail(null);
+      console.log("[Gemini Face Debug] Engine not ready");
+      setIsDebugOpen(true);
+      return;
+    }
+    const pageId = pageRef.current;
+    if (!pageId || !engine.block.isValid(pageId)) {
+      setGeminiFaceDebug(
+        JSON.stringify({ error: "Video scene is not ready yet." }, null, 2)
+      );
+      setGeminiFaceThumbnail(null);
+      console.log("[Gemini Face Debug] Page not ready", { pageId });
+      setIsDebugOpen(true);
+      return;
+    }
+
+    setIsFaceDebugLoading(true);
+    setGeminiFaceDebug(null);
+    setGeminiFaceThumbnail(null);
+    setDebugExportMetrics(null);
+
+    try {
+      const duration = sourceVideoDuration || timelineDuration || 0;
+      const candidateTime = Number.isFinite(timelinePosition)
+        ? Math.max(0, timelinePosition)
+        : 0;
+      const sampleTime =
+        duration > 0 ? Math.min(candidateTime, duration) : candidateTime;
+      console.log("[Gemini Face Debug] Sample time", {
+        sampleTime,
+        duration,
+      });
+      const playbackSupported = engine.block.supportsPlaybackTime(pageId);
+      const pageWidth = engine.block.getWidth(pageId);
+      const pageHeight = engine.block.getHeight(pageId);
+      setDebugExportMetrics(
+        JSON.stringify(
+          {
+            pageWidth,
+            pageHeight,
+            targetWidth: FACE_DEBUG_EXPORT_SIZE,
+            targetHeight: FACE_DEBUG_EXPORT_SIZE,
+          },
+          null,
+          2
+        )
+      );
+      const previousPlaybackTime = playbackSupported
+        ? engine.block.getPlaybackTime(pageId)
+        : 0;
+      const wasPlaying = playbackSupported ? engine.block.isPlaying(pageId) : false;
+      if (playbackSupported) {
+        try {
+          engine.block.setPlaying(pageId, false);
+          engine.block.setPlaybackTime(pageId, sampleTime);
+        } catch (error) {
+          console.warn("Failed to set playback time for debug export", error);
+        }
+      }
+      let imageDataUrl = "";
+      let displayUrl = "";
+      const exportStart = performance.now();
+      let timeoutId: number | null = null;
+      try {
+        console.log("[Gemini Face Debug] Exporting page snapshot", {
+          target: FACE_DEBUG_EXPORT_SIZE,
+          pageWidth,
+          pageHeight,
+        });
+        const exportPromise = engine.block.export(pageId, {
+          mimeType: "image/jpeg",
+          jpegQuality: 0.9,
+          targetWidth: FACE_DEBUG_EXPORT_SIZE,
+          targetHeight: FACE_DEBUG_EXPORT_SIZE,
+        });
+        const timeoutPromise = new Promise<Blob>((_resolve, reject) => {
+          timeoutId = window.setTimeout(() => {
+            reject(
+              new Error(
+                `Thumbnail export timed out after ${FACE_DEBUG_EXPORT_TIMEOUT_MS}ms`
+              )
+            );
+          }, FACE_DEBUG_EXPORT_TIMEOUT_MS);
+        });
+        const blob = await Promise.race([exportPromise, timeoutPromise]);
+        console.log("[Gemini Face Debug] Exported thumbnail", {
+          size: blob.size,
+          type: blob.type,
+          target: FACE_DEBUG_EXPORT_SIZE,
+          ms: Math.round(performance.now() - exportStart),
+        });
+        if (blob.size === 0) {
+          throw new Error("Exported thumbnail blob is empty.");
+        }
+        if (typeof URL !== "undefined" && typeof URL.createObjectURL === "function") {
+          displayUrl = URL.createObjectURL(blob);
+          console.log("[Gemini Face Debug] Created display URL", displayUrl);
+          setGeminiFaceThumbnail(displayUrl);
+        }
+        imageDataUrl = await blobToDataUrl(blob);
+        console.log("[Gemini Face Debug] Data URL size", {
+          length: imageDataUrl.length,
+        });
+        if (!imageDataUrl) {
+          throw new Error("Failed to export debug thumbnail.");
+        }
+      } catch (error) {
+        console.error("[Gemini Face Debug] Export failed", error);
+        setGeminiFaceDebug(
+          JSON.stringify(
+            {
+              error: "Failed to export debug thumbnail.",
+              detail: error instanceof Error ? error.message : String(error),
+            },
+            null,
+            2
+          )
+        );
+        setIsDebugOpen(true);
+        return;
+      } finally {
+        if (timeoutId) {
+          window.clearTimeout(timeoutId);
+        }
+        if (playbackSupported) {
+          try {
+            engine.block.setPlaybackTime(pageId, previousPlaybackTime);
+            engine.block.setPlaying(pageId, wasPlaying);
+          } catch (error) {
+            console.warn("Failed to restore playback after debug export", error);
+          }
+        }
+      }
+      if (!displayUrl) {
+        setGeminiFaceThumbnail(imageDataUrl);
+      }
+      const geminiProvider =
+        process.env.NEXT_PUBLIC_GEMINI_PROVIDER?.trim().toLowerCase() ||
+        "openrouter";
+      const visionModel =
+        process.env.NEXT_PUBLIC_GEMINI_VISION_MODEL?.trim() || "";
+      const proxyBase =
+        process.env.NEXT_PUBLIC_GEMINI_PROXY_URL?.replace(/\/$/, "") ?? "";
+      const payload: Record<string, unknown> = {
+        imageDataUrl,
+        provider: geminiProvider,
+      };
+      if (visionModel) payload.model = visionModel;
+
+      const response = await fetch(
+        `${proxyBase ? proxyBase : ""}/api/gemini-face-boxes`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(payload),
+        }
+      );
+      const rawText = await response.text();
+      if (!response.ok) {
+        setGeminiFaceDebug(
+          JSON.stringify(
+            {
+              error: "Gemini face box request failed.",
+              status: response.status,
+              detail: rawText,
+            },
+            null,
+            2
+          )
+        );
+        setIsDebugOpen(true);
+        return;
+      }
+
+      let parsed: unknown = null;
+      try {
+        parsed = JSON.parse(rawText);
+      } catch (error) {
+        parsed = null;
+      }
+      setGeminiFaceDebug(
+        parsed ? JSON.stringify(parsed, null, 2) : rawText || "No response."
+      );
+      setIsDebugOpen(true);
+    } catch (error) {
+      setGeminiFaceDebug(
+        JSON.stringify(
+          {
+            error: "Failed to request Gemini face boxes.",
+            detail: error instanceof Error ? error.message : String(error),
+          },
+          null,
+          2
+        )
+      );
+      setIsDebugOpen(true);
+    } finally {
+      setIsFaceDebugLoading(false);
+    }
+  };
+
+  const handleTinyDebugExport = async () => {
+    if (isFaceDebugLoading) return;
+    console.log("[Gemini Face Debug] Starting tiny export");
+    const engine = engineRef.current;
+    const pageId = pageRef.current;
+    if (!engine || !pageId || !engine.block.isValid(pageId)) {
+      setGeminiFaceDebug(
+        JSON.stringify({ error: "Video scene is not ready yet." }, null, 2)
+      );
+      console.log("[Gemini Face Debug] Tiny export page not ready", {
+        pageId,
+      });
+      setIsDebugOpen(true);
+      return;
+    }
+    setIsFaceDebugLoading(true);
+    setGeminiFaceDebug(null);
+    setGeminiFaceThumbnail(null);
+    setDebugExportMetrics(null);
+
+    try {
+      const pageWidth = engine.block.getWidth(pageId);
+      const pageHeight = engine.block.getHeight(pageId);
+      const tinySize = 240;
+      console.log("[Gemini Face Debug] Tiny export metrics", {
+        pageWidth,
+        pageHeight,
+        target: tinySize,
+      });
+      setDebugExportMetrics(
+        JSON.stringify(
+          {
+            pageWidth,
+            pageHeight,
+            targetWidth: tinySize,
+            targetHeight: tinySize,
+            mode: "tiny-export",
+          },
+          null,
+          2
+        )
+      );
+      const blob = await engine.block.export(pageId, {
+        mimeType: "image/jpeg",
+        jpegQuality: 0.85,
+        targetWidth: tinySize,
+        targetHeight: tinySize,
+      });
+      console.log("[Gemini Face Debug] Tiny export result", {
+        size: blob.size,
+        type: blob.type,
+      });
+      if (blob.size === 0) {
+        throw new Error("Tiny export returned empty blob.");
+      }
+      const displayUrl =
+        typeof URL !== "undefined" && typeof URL.createObjectURL === "function"
+          ? URL.createObjectURL(blob)
+          : "";
+      if (displayUrl) {
+        setGeminiFaceThumbnail(displayUrl);
+      } else {
+        setGeminiFaceThumbnail(await blobToDataUrl(blob));
+      }
+      setIsDebugOpen(true);
+    } catch (error) {
+      console.error("[Gemini Face Debug] Tiny export failed", error);
+      setGeminiFaceDebug(
+        JSON.stringify(
+          {
+            error: "Tiny export failed.",
+            detail: error instanceof Error ? error.message : String(error),
+          },
+          null,
+          2
+        )
+      );
+      setIsDebugOpen(true);
+    } finally {
+      setIsFaceDebugLoading(false);
+    }
+  };
+
   const buildAnalysisEstimate = (words: TranscriptWord[]): AnalysisEstimate | null => {
     const wordCount = words.length;
     if (!wordCount) return null;
     const minSeconds = Math.max(8, Math.round(wordCount * 0.015));
     const maxSeconds = Math.max(minSeconds + 5, Math.round(wordCount * 0.03));
     return { minSeconds, maxSeconds, wordCount };
+  };
+
+  const blobToDataUrl = (blob: Blob) =>
+    new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result ?? ""));
+      reader.onerror = () =>
+        reject(reader.error ?? new Error("Failed to read thumbnail blob."));
+      reader.readAsDataURL(blob);
+    });
+
+  const resolvePrimarySpeakerId = (
+    faceSlotsBySpeaker: Record<string, FaceBounds[]>
+  ) => {
+    let primarySpeakerId: string | null = null;
+    let maxFaces = 0;
+    Object.entries(faceSlotsBySpeaker).forEach(([speakerId, faces]) => {
+      if (faces.length > maxFaces) {
+        maxFaces = faces.length;
+        primarySpeakerId = speakerId;
+      }
+    });
+    return { primarySpeakerId, maxFaces };
+  };
+
+  const normalizeThumbnailSource = async (src: string) => {
+    if (!src) return src;
+    if (src.startsWith("data:")) return src;
+    if (!src.startsWith("blob:")) return src;
+    const response = await fetch(src);
+    const blob = await response.blob();
+    return blobToDataUrl(blob);
+  };
+
+  const buildPreloadScriptPayload = async (): Promise<PreloadScript> => {
+    if (preloadSnapshotRef.current?.thumbnails?.length) {
+      return {
+        ...preloadSnapshotRef.current,
+        exportedAt: new Date().toISOString(),
+      };
+    }
+    const pending = pendingWorkflowRef.current;
+    const refinement = pending?.refinement ?? lastRefinementRef.current;
+    const words = pending?.words ?? currentTranscriptWords;
+    const desiredVariants =
+      pending?.desiredVariants ?? lastDesiredVariantsRef.current;
+    const refinementModeValue =
+      pending?.refinement
+        ? refinementMode
+        : lastRefinementModeRef.current;
+    if (!refinement) {
+      throw new Error("Missing Gemini refinement. Run the workflow first.");
+    }
+    if (!words.length) {
+      throw new Error("Missing transcript words. Run the workflow first.");
+    }
+    if (!speakerSnippets.length) {
+      throw new Error("Missing speaker snippets. Run the workflow first.");
+    }
+    if (!speakerThumbnails.length) {
+      throw new Error("Missing face thumbnails. Run the workflow first.");
+    }
+    if (!Object.keys(speakerFaceSlots).length) {
+      throw new Error("Missing face bounds. Run the workflow first.");
+    }
+    const { primarySpeakerId, maxFaces } =
+      resolvePrimarySpeakerId(speakerFaceSlots);
+    const resolvedPrimarySpeakerId =
+      primarySpeakerId ?? speakerThumbnails[0]?.speakerId ?? null;
+    const normalizedThumbnails = await Promise.all(
+      speakerThumbnails.map(async (thumb) => ({
+        ...thumb,
+        src: await normalizeThumbnailSource(thumb.src),
+      }))
+    );
+    return {
+      version: 1,
+      refinementMode: refinementModeValue,
+      desiredVariants,
+      words,
+      refinement,
+      speakerSnippets,
+      faceSlotsBySpeaker: speakerFaceSlots,
+      thumbnails: normalizedThumbnails,
+      primarySpeakerId: resolvedPrimarySpeakerId,
+      maxFaces,
+      exportedAt: new Date().toISOString(),
+    };
+  };
+
+  const cachePreloadSnapshot = async (params: {
+    words: TranscriptWord[];
+    refinement: GeminiRefinement;
+    refinementMode: RefinementMode;
+    desiredVariants: number;
+    snippets: SpeakerSnippet[];
+    preload: {
+      faceSlotsBySpeaker: Record<string, FaceBounds[]>;
+      thumbnails: SpeakerFaceThumbnail[];
+      primarySpeakerId: string | null;
+      maxFaces: number;
+    };
+  }) => {
+    try {
+      const normalizedThumbnails = await Promise.all(
+        params.preload.thumbnails.map(async (thumb) => ({
+          ...thumb,
+          src: await normalizeThumbnailSource(thumb.src),
+        }))
+      );
+      preloadSnapshotRef.current = {
+        version: 1,
+        refinementMode: params.refinementMode,
+        desiredVariants: params.desiredVariants,
+        words: params.words,
+        refinement: params.refinement,
+        speakerSnippets: params.snippets,
+        faceSlotsBySpeaker: params.preload.faceSlotsBySpeaker,
+        thumbnails: normalizedThumbnails,
+        primarySpeakerId: params.preload.primarySpeakerId,
+        maxFaces: params.preload.maxFaces,
+        exportedAt: new Date().toISOString(),
+      };
+    } catch (error) {
+      console.warn("Failed to cache preload script snapshot", error);
+      preloadSnapshotRef.current = null;
+    }
+  };
+
+  const buildSpeakerSnippets = (
+    words: TranscriptWord[],
+    totalDuration?: number | null
+  ): SpeakerSnippet[] => {
+    if (!words.length) return [];
+    const orderedSpeakerIds: string[] = [];
+    const speakerMap = new Map<string, TranscriptWord[]>();
+    words.forEach((word) => {
+      const speakerId = word.speaker_id ?? "unknown";
+      if (!speakerMap.has(speakerId)) {
+        speakerMap.set(speakerId, []);
+        orderedSpeakerIds.push(speakerId);
+      }
+      speakerMap.get(speakerId)?.push(word);
+    });
+
+    return orderedSpeakerIds.map((speakerId, index) => {
+      const speakerWords = (speakerMap.get(speakerId) ?? []).slice();
+      speakerWords.sort((a, b) => a.start - b.start);
+      const segments: TimeRange[] = [];
+      let segmentStart = speakerWords[0]?.start ?? 0;
+      let segmentEnd = speakerWords[0]?.end ?? segmentStart;
+      speakerWords.slice(1).forEach((word) => {
+        const gap = word.start - segmentEnd;
+        if (gap > SPEAKER_SEGMENT_GAP_SECONDS) {
+          segments.push({ start: segmentStart, end: segmentEnd });
+          segmentStart = word.start;
+          segmentEnd = word.end;
+          return;
+        }
+        segmentEnd = Math.max(segmentEnd, word.end);
+      });
+      segments.push({ start: segmentStart, end: segmentEnd });
+
+      const candidate =
+        segments.find(
+          (segment) => segment.end - segment.start >= SPEAKER_SNIPPET_MIN_SECONDS
+        ) ??
+        segments.reduce((best, segment) => {
+          const bestDuration = best.end - best.start;
+          const nextDuration = segment.end - segment.start;
+          return nextDuration > bestDuration ? segment : best;
+        }, segments[0] ?? { start: 0, end: 0 });
+
+      const minEnd = candidate.start + SPEAKER_SNIPPET_MIN_SECONDS;
+      let end = Math.max(candidate.end, minEnd);
+      if (Number.isFinite(totalDuration) && (totalDuration ?? 0) > 0) {
+        end = Math.min(end, totalDuration as number);
+      }
+
+      return {
+        id: speakerId,
+        label: `Speaker ${index + 1}`,
+        start: candidate.start,
+        end,
+      };
+    });
+  };
+
+  const countSpeakersFromWords = (words: TranscriptWord[]) => {
+    const speakers = new Set<string>();
+    words.forEach((word) => {
+      speakers.add(word.speaker_id ?? "unknown");
+    });
+    return speakers.size;
+  };
+
+  const mapTrimmedWordsToSourceOrFallback = (
+    sourceWords: TranscriptWord[],
+    trimmedWords: TranscriptWord[]
+  ) => {
+    const mapped = mapTrimmedWordsToSource(sourceWords, trimmedWords);
+    return mapped.length ? mapped : trimmedWords;
+  };
+
+  const mergeTranscriptWords = (wordSets: TranscriptWord[][]) => {
+    const unique = new Map<string, TranscriptWord>();
+    wordSets.forEach((set) => {
+      set.forEach((word) => {
+        const key = `${word.start}-${word.end}-${word.text ?? ""}-${
+          word.speaker_id ?? "unknown"
+        }`;
+        if (!unique.has(key)) {
+          unique.set(key, word);
+        }
+      });
+    });
+    return Array.from(unique.values()).sort((a, b) => a.start - b.start);
+  };
+
+  const buildSpeakerAssignments = (
+    assignments: Record<string, number>,
+    slotsBySpeaker: Record<string, FaceBounds[]>,
+    fallbackSlots: FaceBounds[]
+  ) => {
+    const map = new Map<string, FaceBounds>();
+    Object.entries(assignments).forEach(([speakerId, slotIndex]) => {
+      const resolved =
+        slotsBySpeaker[speakerId]?.[slotIndex] ?? fallbackSlots[slotIndex];
+      if (resolved) {
+        map.set(speakerId, resolved);
+      }
+    });
+    return map;
+  };
+
+  const buildSpeakerThumbnailAssignments = (
+    assignments: Record<string, number>,
+    thumbnails: SpeakerFaceThumbnail[]
+  ) => {
+    const map: Record<string, SpeakerFaceThumbnail> = {};
+    Object.entries(assignments).forEach(([speakerId, slotIndex]) => {
+      const match = thumbnails.find(
+        (thumb) => thumb.speakerId === speakerId && thumb.slotIndex === slotIndex
+      );
+      if (match) {
+        map[speakerId] = match;
+      }
+    });
+    return map;
+  };
+
+  const resolveSpeakerForRange = (
+    range: TimeRange,
+    words: TranscriptWord[]
+  ): string | null => {
+    const counts = new Map<string, number>();
+    words.forEach((word) => {
+      if (word.start >= range.end || word.end <= range.start) return;
+      const speakerId = word.speaker_id ?? "unknown";
+      counts.set(speakerId, (counts.get(speakerId) ?? 0) + 1);
+    });
+    if (!counts.size) return null;
+    const filteredCounts =
+      counts.size > 1 && counts.has("unknown")
+        ? new Map(
+            Array.from(counts.entries()).filter(([id]) => id !== "unknown")
+          )
+        : counts;
+    const resolvedCounts = filteredCounts.size ? filteredCounts : counts;
+    let best: { id: string; count: number } | null = null;
+    resolvedCounts.forEach((count, id) => {
+      if (!best || count > best.count) {
+        best = { id, count };
+      }
+    });
+    return best?.id ?? null;
+  };
+
+  const splitRangesBySpeaker = (
+    ranges: TimeRange[],
+    words: TranscriptWord[]
+  ) => {
+    if (!ranges.length || !words.length) return ranges;
+    const sortedWords = words
+      .filter((word) => Number.isFinite(word.start) && Number.isFinite(word.end))
+      .slice()
+      .sort((a, b) => a.start - b.start);
+    if (!sortedWords.length) return ranges;
+    const minDuration = 0.01;
+
+    return ranges.flatMap((range) => {
+      const overlapping = sortedWords.filter(
+        (word) => word.start < range.end && word.end > range.start
+      );
+      if (!overlapping.length) return [range];
+      const uniqueSpeakers = new Set(
+        overlapping.map((word) => word.speaker_id ?? "unknown")
+      );
+      if (uniqueSpeakers.size <= 1) return [range];
+
+      const segments: TimeRange[] = [];
+      let currentSpeaker = overlapping[0]?.speaker_id ?? "unknown";
+      let segmentStart = range.start;
+
+      overlapping.forEach((word) => {
+        const speakerId = word.speaker_id ?? "unknown";
+        if (speakerId !== currentSpeaker) {
+          const segmentEnd = Math.min(range.end, word.start);
+          if (segmentEnd - segmentStart >= minDuration) {
+            segments.push({ start: segmentStart, end: segmentEnd });
+          }
+          currentSpeaker = speakerId;
+          segmentStart = Math.max(range.start, word.start);
+        }
+      });
+
+      if (range.end - segmentStart >= minDuration) {
+        segments.push({ start: segmentStart, end: range.end });
+      }
+
+      return segments.length ? segments : [range];
+    });
   };
 
   const transcribeExtractedAudio = async (
@@ -1031,6 +4208,458 @@ export default function App() {
     }
   };
 
+  const applyRefinementToTimeline = async (
+    words: TranscriptWord[],
+    refinement: GeminiRefinement,
+    desiredVariants: number
+  ) => {
+    if (refinement.concepts.length && desiredVariants > 1) {
+      setConceptChoices(refinement.concepts);
+      const defaultConcept = refinement.concepts[0];
+      setSelectedConceptId(defaultConcept?.id ?? null);
+      setApplyingConceptId(null);
+      if (defaultConcept) {
+        await applyTranscriptCuts(
+          words,
+          defaultConcept.trimmed_words,
+          defaultConcept.hook
+        );
+      }
+    } else {
+      setConceptChoices([]);
+      setSelectedConceptId(null);
+      setApplyingConceptId(null);
+      await applyTranscriptCuts(words, refinement.trimmed_words, refinement.hook);
+    }
+  };
+
+  const handleExportPreloadScript = async () => {
+    if (isPreloadScriptExporting) return;
+    setIsPreloadScriptExporting(true);
+    setPreloadScript(null);
+    try {
+      const payload = await buildPreloadScriptPayload();
+      setPreloadScript(JSON.stringify(payload, null, 2));
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Failed to export preload script.";
+      setPreloadScript(JSON.stringify({ error: message }, null, 2));
+    } finally {
+      setIsPreloadScriptExporting(false);
+    }
+  };
+
+  const handleImportPreloadScript = async () => {
+    if (isImportingScript) return;
+    setImportScriptError(null);
+    const raw = importScriptText.trim();
+    if (!raw) {
+      setImportScriptError("Paste a preload script first.");
+      return;
+    }
+    if (!videoFile) {
+      setImportScriptError("Upload a video before importing a script.");
+      return;
+    }
+    let parsed: PreloadScript;
+    try {
+      parsed = JSON.parse(raw) as PreloadScript;
+    } catch (error) {
+      setImportScriptError("Script is not valid JSON.");
+      return;
+    }
+    if (!parsed || parsed.version !== 1) {
+      setImportScriptError("Unsupported script version.");
+      return;
+    }
+    if (!parsed.words?.length) {
+      setImportScriptError("Script is missing transcript words.");
+      return;
+    }
+    if (!parsed.refinement) {
+      setImportScriptError("Script is missing Gemini refinement.");
+      return;
+    }
+    if (!parsed.speakerSnippets?.length) {
+      setImportScriptError("Script is missing speaker snippets.");
+      return;
+    }
+    if (!parsed.thumbnails?.length) {
+      setImportScriptError("Script is missing face thumbnails.");
+      return;
+    }
+    setIsImportingScript(true);
+    try {
+      beginWorkflow();
+      resetPreloadState();
+      preloadSnapshotRef.current = parsed;
+      setTranscriptDebug(null);
+      setGeminiDebug(null);
+      setGeminiFaceDebug(null);
+      setGeminiFaceThumbnail(null);
+      setDebugExportMetrics(null);
+      setCaptionDebug(buildCaptionDebugMap(parsed.words, parsed.refinement));
+      setIsDebugOpen(false);
+      setIsFaceDebugLoading(false);
+      setTimelineSegments([]);
+      setIsScrubbingTimeline(false);
+      clearCaptionsTrack();
+      setIsExtracting(false);
+      setIsTranscribing(false);
+      setProgress(0);
+      setAutoProcessingError(null);
+      updateProcessingStatus("audio", "complete");
+      updateProcessingStatus("transcript", "complete");
+      updateProcessingStatus("analysis", "complete");
+      updateProcessingStatus("preload", "active");
+
+      setCurrentTranscriptWords(parsed.words);
+      setAnalysisEstimate(buildAnalysisEstimate(parsed.words));
+      if (parsed.refinementMode) {
+        setRefinementMode(parsed.refinementMode);
+        lastRefinementModeRef.current = parsed.refinementMode;
+      }
+      lastRefinementRef.current = parsed.refinement;
+      const desiredVariants =
+        Number.isFinite(parsed.desiredVariants) && parsed.desiredVariants > 0
+          ? Math.floor(parsed.desiredVariants)
+          : 1;
+      lastDesiredVariantsRef.current = desiredVariants;
+
+      const resolvedSlots = parsed.faceSlotsBySpeaker ?? {};
+      const resolvedThumbnails = parsed.thumbnails ?? [];
+      const primaryFallback = resolvePrimarySpeakerId(resolvedSlots);
+      const resolvedPrimarySpeakerId =
+        parsed.primarySpeakerId ?? primaryFallback.primarySpeakerId ?? null;
+      const resolvedMaxFaces =
+        Number.isFinite(parsed.maxFaces) && parsed.maxFaces > 0
+          ? parsed.maxFaces
+          : primaryFallback.maxFaces;
+      const preloadResult = {
+        faceSlotsBySpeaker: resolvedSlots,
+        thumbnails: resolvedThumbnails,
+        primarySpeakerId: resolvedPrimarySpeakerId,
+        maxFaces: resolvedMaxFaces,
+      };
+
+      setSpeakerSnippets(parsed.speakerSnippets);
+      setSpeakerThumbnails(resolvedThumbnails);
+      setSpeakerFaceSlots(resolvedSlots);
+      const primarySlots =
+        (resolvedPrimarySpeakerId && resolvedSlots[resolvedPrimarySpeakerId]) ??
+        [];
+      setPrimaryFaceSlots(primarySlots);
+      const optionFaces = resolvedPrimarySpeakerId
+        ? resolvedThumbnails
+            .filter((thumb) => thumb.speakerId === resolvedPrimarySpeakerId)
+            .sort((a, b) => a.slotIndex - b.slotIndex)
+        : [];
+      const optionSlots = Array.from(
+        new Set(optionFaces.map((face) => face.slotIndex))
+      ).sort((a, b) => a - b);
+      setFaceOptions(optionFaces);
+
+      const needsIdentification =
+        optionSlots.length > 1 && parsed.speakerSnippets.length > 1;
+      if (needsIdentification) {
+        pendingWorkflowRef.current = {
+          words: parsed.words,
+          refinement: parsed.refinement,
+          desiredVariants,
+        };
+        const started = beginSpeakerIdentification(
+          parsed.speakerSnippets,
+          preloadResult
+        );
+        if (started) {
+          setIsImportScriptOpen(false);
+          setImportScriptText("");
+          return;
+        }
+        setHidePreloadThumbnails(false);
+        pendingWorkflowRef.current = null;
+      } else {
+        setHidePreloadThumbnails(false);
+      }
+
+      if (!needsIdentification && optionSlots.length === 1) {
+        const slotIndex = optionSlots[0];
+        if (parsed.speakerSnippets.length > 1 && slotIndex !== undefined) {
+          const singleAssignments: Record<string, number> = {};
+          parsed.speakerSnippets.forEach((snippet) => {
+            singleAssignments[snippet.id] = slotIndex;
+          });
+          speakerAssignmentsRef.current = singleAssignments;
+          setSpeakerAssignments(singleAssignments);
+          const assignedThumbnails = buildSpeakerThumbnailAssignments(
+            singleAssignments,
+            resolvedThumbnails
+          );
+          setSpeakerAssignedThumbnails(assignedThumbnails);
+          const assignedList = Object.values(assignedThumbnails);
+          if (assignedList.length) {
+            const toRevoke = resolvedThumbnails.filter(
+              (thumb) => !assignedList.includes(thumb)
+            );
+            if (toRevoke.length) {
+              window.setTimeout(() => {
+                revokeSpeakerThumbnailUrls(toRevoke);
+              }, 0);
+            }
+            setSpeakerThumbnails(assignedList);
+          }
+        }
+      }
+
+      updateProcessingStatus("preload", "complete");
+      await applyRefinementToTimeline(
+        parsed.words,
+        parsed.refinement,
+        desiredVariants
+      );
+      setAutoProcessing(false);
+      setIsImportScriptOpen(false);
+      setImportScriptText("");
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Failed to import preload script.";
+      setImportScriptError(message);
+    } finally {
+      setIsImportingScript(false);
+    }
+  };
+
+  const stopSpeakerPlayback = () => {
+    if (speakerPlaybackTimeoutRef.current) {
+      window.clearTimeout(speakerPlaybackTimeoutRef.current);
+      speakerPlaybackTimeoutRef.current = null;
+    }
+    const engine = engineRef.current;
+    const pageId = pageRef.current;
+    if (!engine || !pageId || !engine.block.isValid(pageId)) return;
+    try {
+      engine.block.setPlaying(pageId, false);
+    } catch (error) {
+      console.warn("Failed to stop speaker playback", error);
+    }
+    setIsSpeakerAudioPlaying(false);
+  };
+
+  const playSpeakerSnippet = (snippet: SpeakerSnippet) => {
+    const engine = engineRef.current;
+    const pageId = pageRef.current;
+    if (!engine || !pageId || !engine.block.isValid(pageId)) return;
+    stopSpeakerPlayback();
+    setAudioPlaybackMuted(false);
+    const safeStart = Math.max(0, snippet.start);
+    const safeEnd = Math.max(safeStart, snippet.end);
+    const durationMs = Math.max(0.1, safeEnd - safeStart) * 1000;
+    try {
+      engine.block.setPlaybackTime(pageId, safeStart);
+      engine.block.setPlaying(pageId, true);
+      setIsSpeakerAudioPlaying(true);
+      setHasPlayedSpeakerAudio(true);
+    } catch (error) {
+      console.warn("Failed to play speaker snippet", error);
+      return;
+    }
+    speakerPlaybackTimeoutRef.current = window.setTimeout(() => {
+      stopSpeakerPlayback();
+    }, durationMs);
+  };
+
+  const beginSpeakerIdentification = (
+    snippets: SpeakerSnippet[],
+    preloadResult: {
+      faceSlotsBySpeaker: Record<string, FaceBounds[]>;
+      thumbnails: SpeakerFaceThumbnail[];
+      primarySpeakerId: string | null;
+      maxFaces: number;
+    }
+  ) => {
+    const { faceSlotsBySpeaker, thumbnails, primarySpeakerId } = preloadResult;
+    console.info("[Speaker Debug] Begin identification", {
+      speakers: snippets.map((snippet) => snippet.id),
+      primarySpeakerId,
+      faceCounts: Object.fromEntries(
+        Object.entries(faceSlotsBySpeaker).map(([id, faces]) => [
+          id,
+          faces.length,
+        ])
+      ),
+      thumbnailCounts: thumbnails.reduce<Record<string, number>>(
+        (acc, thumb) => {
+          acc[thumb.speakerId] = (acc[thumb.speakerId] ?? 0) + 1;
+          return acc;
+        },
+        {}
+      ),
+    });
+    setSpeakerFaceSlots(faceSlotsBySpeaker);
+    setSpeakerThumbnails(thumbnails);
+    setSpeakerAssignedThumbnails({});
+    const primarySlots =
+      (primarySpeakerId && faceSlotsBySpeaker[primarySpeakerId]) ?? [];
+    setPrimaryFaceSlots(primarySlots);
+    const optionFaces = primarySpeakerId
+      ? thumbnails
+          .filter((thumb) => thumb.speakerId === primarySpeakerId)
+          .sort((a, b) => a.slotIndex - b.slotIndex)
+      : [];
+    const optionSlots = Array.from(
+      new Set(optionFaces.map((face) => face.slotIndex))
+    ).sort((a, b) => a - b);
+    setFaceOptions(optionFaces);
+    speakerAssignmentsRef.current = {};
+    setSpeakerAssignments({});
+    setAvailableFaceSlots(optionSlots);
+    const queuedSpeakers = snippets.map((snippet) => snippet.id);
+    setSpeakerQueue(queuedSpeakers);
+    setActiveSpeakerId(queuedSpeakers[0] ?? null);
+    setHasPlayedSpeakerAudio(false);
+    setIsSpeakerAudioPlaying(false);
+    setHidePreloadThumbnails(true);
+    const shouldStart = queuedSpeakers.length > 0 && optionSlots.length > 1;
+    setIsSpeakerIdentificationActive(shouldStart);
+    return shouldStart;
+  };
+
+  const finalizePendingWorkflow = async (assignments: Record<string, number>) => {
+    const pending = pendingWorkflowRef.current;
+    if (!pending) return;
+    try {
+      stopSpeakerPlayback();
+      speakerAssignmentsRef.current = assignments;
+      setSpeakerAssignments(assignments);
+      await applyRefinementToTimeline(
+        pending.words,
+        pending.refinement,
+        pending.desiredVariants
+      );
+      updateProcessingStatus("preload", "complete");
+      pendingWorkflowRef.current = null;
+      setIsSpeakerIdentificationActive(false);
+      setActiveSpeakerId(null);
+      setSpeakerQueue([]);
+      setAvailableFaceSlots([]);
+      setHasPlayedSpeakerAudio(false);
+      setIsSpeakerAudioPlaying(false);
+    } catch (error) {
+      console.error("Failed to finalize speaker identification", error);
+      updateProcessingStatus("preload", "error");
+      setAutoProcessingError(
+        error instanceof Error
+          ? error.message
+          : "Failed to apply speaker identification."
+      );
+    } finally {
+      setAutoProcessing(false);
+    }
+  };
+
+  const handleFaceSelection = async (selectedFace: SpeakerFaceThumbnail) => {
+    if (!activeSpeakerId) return;
+    stopSpeakerPlayback();
+    const slotIndex = selectedFace.slotIndex;
+    const selectedThumbnails = speakerThumbnails.filter(
+      (thumb) => thumb.slotIndex === slotIndex
+    );
+    const remainingThumbnails = speakerThumbnails.filter(
+      (thumb) => thumb.slotIndex !== slotIndex
+    );
+    setFaceOptions((prev) =>
+      prev.filter((thumb) => thumb.slotIndex !== slotIndex)
+    );
+    const assignedThumbnail = selectedFace;
+    console.info("[Speaker Debug] Face selection", {
+      activeSpeakerId,
+      slotIndex,
+      selectedCount: selectedThumbnails.length,
+      assignedFound: Boolean(assignedThumbnail),
+      remainingCount: remainingThumbnails.length,
+    });
+    if (assignedThumbnail) {
+      setSpeakerAssignedThumbnails((prev) => ({
+        ...prev,
+        [activeSpeakerId]: assignedThumbnail,
+      }));
+    }
+    const thumbnailsToRevoke = selectedThumbnails.filter(
+      (thumb) => thumb !== assignedThumbnail
+    );
+    if (thumbnailsToRevoke.length) {
+      window.setTimeout(() => {
+        revokeSpeakerThumbnailUrls(thumbnailsToRevoke);
+      }, 0);
+    }
+    const nextAssignments = {
+      ...speakerAssignments,
+      [activeSpeakerId]: slotIndex,
+    };
+    speakerAssignmentsRef.current = nextAssignments;
+    const remainingSlots = availableFaceSlots.filter(
+      (slot) => slot !== slotIndex
+    );
+    const remainingQueue = speakerQueue.filter(
+      (speakerId) => speakerId !== activeSpeakerId
+    );
+    if (remainingQueue.length === 1 && remainingSlots.length === 1) {
+      const remainingSpeakerId = remainingQueue[0];
+      const remainingSlot = remainingSlots[0];
+      nextAssignments[remainingSpeakerId] = remainingSlot;
+      speakerAssignmentsRef.current = nextAssignments;
+      const remainingSlotThumbnails = remainingThumbnails.filter(
+        (thumb) => thumb.slotIndex === remainingSlot
+      );
+      const remainingAssignedThumbnail =
+        faceOptions.find((thumb) => thumb.slotIndex === remainingSlot) ??
+        remainingSlotThumbnails.find(
+          (thumb) => thumb.speakerId === remainingSpeakerId
+        ) ??
+        remainingSlotThumbnails[0] ??
+        null;
+      if (remainingAssignedThumbnail) {
+        setSpeakerAssignedThumbnails((prev) => ({
+          ...prev,
+          [remainingSpeakerId]: remainingAssignedThumbnail,
+        }));
+      }
+      const remainingToRevoke = remainingSlotThumbnails.filter(
+        (thumb) => thumb !== remainingAssignedThumbnail
+      );
+      if (remainingToRevoke.length) {
+        window.setTimeout(() => {
+          revokeSpeakerThumbnailUrls(remainingToRevoke);
+        }, 0);
+      }
+      setSpeakerThumbnails(
+        remainingAssignedThumbnail ? [remainingAssignedThumbnail] : []
+      );
+      await finalizePendingWorkflow(nextAssignments);
+      return;
+    }
+    if (remainingQueue.length === 0) {
+      setSpeakerThumbnails(remainingThumbnails);
+      await finalizePendingWorkflow(nextAssignments);
+      return;
+    }
+    if (remainingSlots.length === 0) {
+      setSpeakerThumbnails(remainingThumbnails);
+      await finalizePendingWorkflow(nextAssignments);
+      return;
+    }
+    setSpeakerThumbnails(remainingThumbnails);
+    setSpeakerAssignments(nextAssignments);
+    setAvailableFaceSlots(remainingSlots);
+    setSpeakerQueue(remainingQueue);
+    setActiveSpeakerId(remainingQueue[0] ?? null);
+    setHasPlayedSpeakerAudio(false);
+  };
+
   const runAutomaticWorkflow = async () => {
     if (!videoFile) {
       setAutoProcessingError("Upload a video first.");
@@ -1044,11 +4673,17 @@ export default function App() {
     }
 
     let activeStep: ProcessingStepId | null = null;
+    let shouldFinalize = true;
     beginWorkflow();
+    resetPreloadState();
     setTranscriptDebug(null);
     setGeminiDebug(null);
+    setGeminiFaceDebug(null);
+    setGeminiFaceThumbnail(null);
+    setDebugExportMetrics(null);
     setCaptionDebug(null);
     setIsDebugOpen(false);
+    setIsFaceDebugLoading(false);
     setTimelineSegments([]);
     setIsScrubbingTimeline(false);
     clearCaptionsTrack();
@@ -1082,29 +4717,153 @@ export default function App() {
         refinementMode,
         { variantCount: desiredVariants }
       );
+      lastRefinementRef.current = refinement;
+      lastDesiredVariantsRef.current = desiredVariants;
+      lastRefinementModeRef.current = refinementMode;
       setGeminiDebug(rawText);
       setCaptionDebug(buildCaptionDebugMap(words, refinement));
       updateProcessingStatus("analysis", "complete");
-      activeStep = null;
 
-      if (refinement.concepts.length && desiredVariants > 1) {
-        setConceptChoices(refinement.concepts);
-        const defaultConcept = refinement.concepts[0];
-        setSelectedConceptId(defaultConcept?.id ?? null);
-        setApplyingConceptId(null);
-        if (defaultConcept) {
-          await applyTranscriptCuts(
+      activeStep = "preload";
+      updateProcessingStatus("preload", "active");
+      setHidePreloadThumbnails(true);
+      const snippetSourceWords =
+        refinement.trimmed_words.length > 0 ? refinement.trimmed_words : words;
+      const resolvedSnippetWords =
+        refinement.trimmed_words.length > 0
+          ? mapTrimmedWordsToSourceOrFallback(words, snippetSourceWords)
+          : snippetSourceWords;
+      const variantWordSets =
+        refinement.concepts.length > 0
+          ? refinement.concepts
+              .map((concept) =>
+                mapTrimmedWordsToSourceOrFallback(
+                  words,
+                  concept.trimmed_words
+                )
+              )
+              .filter((set) => set.length)
+          : [];
+      const speakerWordSets = variantWordSets.length
+        ? variantWordSets
+        : [resolvedSnippetWords];
+      const hasMultipleSpeakersInVariants = speakerWordSets.some(
+        (set) => countSpeakersFromWords(set) > 1
+      );
+      const mergedSpeakerWords = hasMultipleSpeakersInVariants
+        ? mergeTranscriptWords(speakerWordSets)
+        : resolvedSnippetWords;
+      const speakerSnippetWords = mergedSpeakerWords.length
+        ? mergedSpeakerWords
+        : resolvedSnippetWords;
+      const totalDuration =
+        sourceVideoDuration ||
+        timelineDuration ||
+        speakerSnippetWords[speakerSnippetWords.length - 1]?.end ||
+        0;
+      const snippets = buildSpeakerSnippets(
+        speakerSnippetWords,
+        totalDuration
+      );
+      setSpeakerSnippets(snippets);
+      setSpeakerThumbnails([]);
+      setSpeakerFaceSlots({});
+      setPrimaryFaceSlots([]);
+      setFaceOptions([]);
+      let preloadResult: {
+        faceSlotsBySpeaker: Record<string, FaceBounds[]>;
+        thumbnails: SpeakerFaceThumbnail[];
+        primarySpeakerId: string | null;
+        maxFaces: number;
+      } | null = null;
+      try {
+        preloadResult = await preloadSpeakerFaces(snippets);
+      } catch (error) {
+        console.warn("Failed to preload speaker faces", error);
+      }
+
+      if (preloadResult) {
+        await cachePreloadSnapshot({
+          words,
+          refinement,
+          refinementMode,
+          desiredVariants,
+          snippets,
+          preload: preloadResult,
+        });
+        setSpeakerFaceSlots(preloadResult.faceSlotsBySpeaker);
+        setSpeakerThumbnails(preloadResult.thumbnails);
+        const primarySlots =
+          (preloadResult.primarySpeakerId &&
+            preloadResult.faceSlotsBySpeaker[preloadResult.primarySpeakerId]) ??
+          [];
+        setPrimaryFaceSlots(primarySlots);
+        const optionFaces = preloadResult.primarySpeakerId
+          ? preloadResult.thumbnails
+              .filter(
+                (thumb) => thumb.speakerId === preloadResult.primarySpeakerId
+              )
+              .sort((a, b) => a.slotIndex - b.slotIndex)
+          : [];
+        const optionSlots = Array.from(
+          new Set(optionFaces.map((face) => face.slotIndex))
+        ).sort((a, b) => a - b);
+        setFaceOptions(optionFaces);
+
+        const needsIdentification =
+          optionSlots.length > 1 &&
+          hasMultipleSpeakersInVariants &&
+          snippets.length > 1;
+        if (needsIdentification) {
+          pendingWorkflowRef.current = {
             words,
-            defaultConcept.trimmed_words,
-            defaultConcept.hook
+            refinement,
+            desiredVariants,
+          };
+          const started = beginSpeakerIdentification(snippets, preloadResult);
+          if (started) {
+            shouldFinalize = false;
+            return;
+          }
+          setHidePreloadThumbnails(false);
+          pendingWorkflowRef.current = null;
+        } else {
+          setHidePreloadThumbnails(false);
+        }
+
+        if (!needsIdentification && optionSlots.length === 1 && snippets.length > 1) {
+          const singleAssignments: Record<string, number> = {};
+          const slotIndex = optionSlots[0];
+          snippets.forEach((snippet) => {
+            singleAssignments[snippet.id] = slotIndex;
+          });
+          speakerAssignmentsRef.current = singleAssignments;
+          setSpeakerAssignments(singleAssignments);
+          const assignedThumbnails = buildSpeakerThumbnailAssignments(
+            singleAssignments,
+            preloadResult.thumbnails
           );
+          setSpeakerAssignedThumbnails(assignedThumbnails);
+          const assignedList = Object.values(assignedThumbnails);
+          if (assignedList.length) {
+            const toRevoke = preloadResult.thumbnails.filter(
+              (thumb) => !assignedList.includes(thumb)
+            );
+            if (toRevoke.length) {
+              window.setTimeout(() => {
+                revokeSpeakerThumbnailUrls(toRevoke);
+              }, 0);
+            }
+            setSpeakerThumbnails(assignedList);
+          }
         }
       } else {
-        setConceptChoices([]);
-        setSelectedConceptId(null);
-        setApplyingConceptId(null);
-        await applyTranscriptCuts(words, refinement.trimmed_words, refinement.hook);
+        setHidePreloadThumbnails(false);
       }
+
+      updateProcessingStatus("preload", "complete");
+      activeStep = null;
+      await applyRefinementToTimeline(words, refinement, desiredVariants);
     } catch (error) {
       console.error("Automatic processing failed", error);
       const message =
@@ -1117,7 +4876,9 @@ export default function App() {
       setAutoProcessingError(message);
     } finally {
       setIsExtracting(false);
-      setAutoProcessing(false);
+      if (shouldFinalize) {
+        setAutoProcessing(false);
+      }
     }
   };
 
@@ -1297,6 +5058,23 @@ export default function App() {
     }
   };
 
+  const setVideoTrackAutoManage = (
+    engine: CreativeEngineInstance,
+    trackId: number,
+    enabled: boolean
+  ) => {
+    if (!engine.block.isValid(trackId)) return;
+    try {
+      engine.block.setBool(
+        trackId,
+        "track/automaticallyManageBlockOffsets",
+        enabled
+      );
+    } catch (error) {
+      console.warn("Failed to configure video track offsets", error);
+    }
+  };
+
   const ensureTrackForVideoBlock = (
     engine: CreativeEngineInstance,
     videoBlockId: number
@@ -1313,11 +5091,13 @@ export default function App() {
       parent = track;
     }
     videoTrackRef.current = parent;
+    setVideoTrackAutoManage(engine, parent, true);
     return parent;
   };
 
   const ensureVideoTrack = (engine: CreativeEngineInstance) => {
     if (videoTrackRef.current && engine.block.isValid(videoTrackRef.current)) {
+      setVideoTrackAutoManage(engine, videoTrackRef.current, true);
       return videoTrackRef.current;
     }
     if (videoBlockRef.current && engine.block.isValid(videoBlockRef.current)) {
@@ -1602,7 +5382,8 @@ export default function App() {
     const keepRanges = buildKeepRangesFromWords(
       sourceWords,
       trimmedWords,
-      totalDuration
+      totalDuration,
+      MIN_CLIP_DURATION_SECONDS
     );
     let rangeMappings: RangeMapping[] = [];
     if (keepRanges.length) {
@@ -1887,10 +5668,13 @@ export default function App() {
     if (engine) {
       clearVideoBlocks(engine);
       clearCaptionsTrack(engine);
+      clearFaceOverlays(engine);
     }
 
     setVideoFile(null);
     resetWorkflowState();
+    resetPreloadState();
+    setSpeakerTemplateId("none");
     setTimelineDuration(0);
     setTimelinePosition(0);
     setIsPlaying(false);
@@ -1909,8 +5693,12 @@ export default function App() {
     setTextHookEnabled(true);
     setTranscriptDebug(null);
     setGeminiDebug(null);
+    setGeminiFaceDebug(null);
+    setGeminiFaceThumbnail(null);
+    setDebugExportMetrics(null);
     setCaptionDebug(null);
     setIsDebugOpen(false);
+    setIsFaceDebugLoading(false);
     setProgress(0);
     setIsDropActive(false);
     setIsExporting(false);
@@ -1919,7 +5707,13 @@ export default function App() {
     faceCropRunIdRef.current += 1;
     textHookTextRef.current = null;
     textHookDurationRef.current = HOOK_DURATION_SECONDS;
-  }, [clearCaptionsTrack, clearVideoBlocks, resetWorkflowState]);
+  }, [
+    clearCaptionsTrack,
+    clearFaceOverlays,
+    clearVideoBlocks,
+    resetPreloadState,
+    resetWorkflowState,
+  ]);
 
   const applyCaptionsForWords = async (
     words: TranscriptWord[],
@@ -2029,6 +5823,14 @@ export default function App() {
   ) => {
     const engine = engineRef.current;
     if (!engine || !sourceWords.length || !refinedWords.length) return;
+    if (audioBlockRef.current && engine.block.isValid(audioBlockRef.current)) {
+      try {
+        engine.block.destroy(audioBlockRef.current);
+      } catch (error) {
+        console.warn("Failed to remove audio block for results", error);
+      }
+    }
+    audioBlockRef.current = null;
 
     applySceneAspectRatio(
       targetAspectRatioId,
@@ -2037,6 +5839,7 @@ export default function App() {
 
     const trackId = ensureVideoTrack(engine);
     if (!trackId) return;
+    setVideoTrackAutoManage(engine, trackId, true);
 
     const templateSource =
       (videoTemplateRef.current &&
@@ -2075,13 +5878,24 @@ export default function App() {
     const keepRanges = buildKeepRangesFromWords(
       sourceWords,
       refinedWords,
-      totalDuration
+      totalDuration,
+      MIN_CLIP_DURATION_SECONDS
     );
 
     if (!keepRanges.length) {
       console.warn("Gemini refinement did not match any transcript ranges.");
       return;
     }
+
+    const speakerResolvedWords = mapTrimmedWordsToSource(
+      sourceWords,
+      refinedWords
+    );
+    const speakerWords = speakerResolvedWords.length
+      ? speakerResolvedWords
+      : sourceWords;
+    const splitRanges = splitRangesBySpeaker(keepRanges, speakerWords);
+    const resolvedKeepRanges = splitRanges.length ? splitRanges : keepRanges;
 
     if (
       !videoTemplateRef.current ||
@@ -2102,6 +5916,15 @@ export default function App() {
     faceCenterCacheRef.current.clear();
     faceCropRunIdRef.current += 1;
 
+    const templateId = speakerTemplateIdRef.current;
+    const shouldUseTemplate =
+      templateId !== "none" &&
+      templateId !== "solo" &&
+      canApplySpeakerTemplate();
+    clearTemplateLayout(engine, {
+      showBase: !shouldUseTemplate,
+    });
+
     const existingChildren = engine.block.getChildren(trackId) ?? [];
     existingChildren.forEach((child) => {
       if (engine.block.isValid(child)) {
@@ -2110,7 +5933,8 @@ export default function App() {
     });
 
     const clipIds: number[] = [];
-    keepRanges.forEach((range) => {
+    const clipRanges: TimeRange[] = [];
+    resolvedKeepRanges.forEach((range) => {
       const length = range.end - range.start;
       if (length <= 0.01) return;
       let clip: number;
@@ -2127,46 +5951,50 @@ export default function App() {
       engine.block.setTrimLength(clipFill, length);
       engine.block.setDuration(clip, length);
       engine.block.appendChild(trackId, clip);
-    clipIds.push(clip);
-  });
+      clipIds.push(clip);
+      clipRanges.push(range);
+    });
 
-  if (!clipIds.length) {
-    console.warn("No clips generated after applying transcript cuts.");
-    return;
-  }
+    baseClipIdsRef.current = clipIds.slice();
+    clipRangesRef.current = clipRanges.slice();
+    setBaseClipVisibility(engine, true);
 
-  if (pageRef.current) {
-    const sceneWidth = engine.block.getWidth(pageRef.current);
-    const sceneHeight = engine.block.getHeight(pageRef.current);
-    const sourceSize =
-      sourceVideoSize ?? { width: 1920, height: 1080 };
-    if (
-      Number.isFinite(sceneWidth) &&
-      Number.isFinite(sceneHeight)
-    ) {
-      syncVideoLayoutToScene(
-        engine,
-        sceneWidth,
-        sceneHeight,
-        sourceSize.width,
-        sourceSize.height
-      );
+    if (!clipIds.length) {
+      console.warn("No clips generated after applying transcript cuts.");
+      return;
     }
-  }
 
-  videoBlockRef.current = clipIds[0];
-  const newDuration = keepRanges.reduce(
-    (sum, range) => sum + (range.end - range.start),
-    0
-  );
+    if (pageRef.current) {
+      const sceneWidth = engine.block.getWidth(pageRef.current);
+      const sceneHeight = engine.block.getHeight(pageRef.current);
+      const sourceSize =
+        sourceVideoSize ?? { width: 1920, height: 1080 };
+      if (
+        Number.isFinite(sceneWidth) &&
+        Number.isFinite(sceneHeight)
+      ) {
+        syncVideoLayoutToScene(
+          engine,
+          sceneWidth,
+          sceneHeight,
+          sourceSize.width,
+          sourceSize.height
+        );
+      }
+    }
+
+    videoBlockRef.current = clipIds[0];
+    const newDuration = resolvedKeepRanges.reduce(
+      (sum, range) => sum + (range.end - range.start),
+      0
+    );
 
     if (pageRef.current) {
       engine.block.setDuration(pageRef.current, newDuration);
     }
     setTimelineDuration(newDuration);
-    setTimelinePosition((prev) => Math.min(prev, newDuration));
     let accumulated = 0;
-    const rangeMappings: RangeMapping[] = keepRanges.map((range) => {
+    const rangeMappings: RangeMapping[] = resolvedKeepRanges.map((range) => {
       const length = range.end - range.start;
       const mapping = {
         start: range.start,
@@ -2181,6 +6009,16 @@ export default function App() {
       end: mapping.timelineStart + (mapping.end - mapping.start),
     }));
     setTimelineSegments(segments);
+    setTimelinePosition(0);
+    setIsPlaying(false);
+    if (pageRef.current && engine.block.supportsPlaybackTime(pageRef.current)) {
+      try {
+        engine.block.setPlaying(pageRef.current, false);
+        engine.block.setPlaybackTime(pageRef.current, 0);
+      } catch (error) {
+        console.warn("Failed to reset playback time", error);
+      }
+    }
     setAudioPlaybackMuted(true);
     await applyCaptionsForWords(refinedWords, { rangeMappings, sourceWords });
     const hookDuration = Math.min(
@@ -2190,7 +6028,34 @@ export default function App() {
     const resolvedHookText =
       coerceHookText(hookText) ?? buildHookTextFromWords(refinedWords);
     applyTextHook(resolvedHookText, hookDuration);
-    void applyFaceAwareCropping(clipIds);
+    const clipSpeakerMap = new Map<number, string | null>();
+    clipRanges.forEach((range, index) => {
+      const speakerId = resolveSpeakerForRange(range, speakerWords);
+      const clipId = clipIds[index];
+      if (typeof clipId === "number") {
+        clipSpeakerMap.set(clipId, speakerId);
+      }
+    });
+    clipSpeakerMapRef.current = clipSpeakerMap;
+    if (templateId === "solo") {
+      void applySoloFaceCropping(clipIds);
+    } else {
+      const speakerFallbackFaces = buildSpeakerAssignments(
+        speakerAssignmentsRef.current,
+        speakerFaceSlots,
+        primaryFaceSlots
+      );
+      void applyFaceAwareCropping(
+        clipIds,
+        undefined,
+        clipSpeakerMap,
+        speakerAssignmentsRef.current,
+        speakerFallbackFaces
+      );
+      if (shouldUseTemplate) {
+        void applySpeakerTemplate(templateId);
+      }
+    }
   };
 
   const getTranscriptWordsSnapshot = (): TranscriptWord[] => {
@@ -2247,7 +6112,7 @@ export default function App() {
 
   const hasVideo = Boolean(videoFile);
   const isWorkflowProcessing =
-    autoProcessing || isExtracting || isTranscribing;
+    autoProcessing || isExtracting || isTranscribing || isSpeakerIdentificationActive;
   const showTrimStage = hasVideo && (!hasStartedWorkflow || autoProcessingError);
   const showProcessingStage =
     hasVideo && hasStartedWorkflow && isWorkflowProcessing;
@@ -2268,6 +6133,129 @@ export default function App() {
   const previewAspectRatio = showResultStage
     ? targetAspectRatio
     : sourceAspectRatio;
+  const activeSpeakerSnippet =
+    activeSpeakerId &&
+    speakerSnippets.find((snippet) => snippet.id === activeSpeakerId);
+  const availableOptions = faceOptions.filter((option) =>
+    availableFaceSlots.includes(option.slotIndex)
+  );
+  const assignedFaceSlots = Object.values(speakerAssignments).filter(
+    (slot) => typeof slot === "number" && Number.isFinite(slot)
+  );
+  const uniqueAssignedSlots = new Set(assignedFaceSlots);
+  const canShowTemplate =
+    showResultStage &&
+    speakerSnippets.length > 1 &&
+    uniqueAssignedSlots.size > 1;
+  const speakerQuestion =
+    isSpeakerIdentificationActive && activeSpeakerSnippet
+      ? {
+          speaker: activeSpeakerSnippet,
+          index: (() => {
+            const idx = speakerSnippets.findIndex(
+              (snippet) => snippet.id === activeSpeakerId
+            );
+            return idx === -1 ? 1 : idx + 1;
+          })(),
+          total: speakerSnippets.length,
+          isPlaying: isSpeakerAudioPlaying,
+          hasPlayed: hasPlayedSpeakerAudio,
+          canPlay: isEngineReady,
+          faceOptions: availableOptions,
+          onPlay: () => playSpeakerSnippet(activeSpeakerSnippet),
+          onSelect: (face: SpeakerFaceThumbnail) =>
+            void handleFaceSelection(face),
+        }
+      : null;
+  const resolveSpeakerLabel = (
+    speakerId: string,
+    fallbackIndex?: number
+  ) => {
+    const match = speakerSnippets.find((snippet) => snippet.id === speakerId);
+    if (match?.label) return match.label;
+    if (speakerId && speakerId !== "unknown") {
+      return `Speaker ${speakerId}`;
+    }
+    if (typeof fallbackIndex === "number") {
+      return `Speaker ${fallbackIndex + 1}`;
+    }
+    return "Unknown speaker";
+  };
+  const resolveSpeakerThumbnail = (speakerId: string) => {
+    const assigned = speakerAssignedThumbnails[speakerId];
+    if (assigned) return assigned;
+    const assignedSlot = speakerAssignments[speakerId];
+    if (typeof assignedSlot === "number" && Number.isFinite(assignedSlot)) {
+      const match = speakerThumbnails.find(
+        (thumb) =>
+          thumb.speakerId === speakerId && thumb.slotIndex === assignedSlot
+      );
+      if (match) return match;
+      const slotMatch = Object.values(speakerAssignedThumbnails).find(
+        (thumb) => thumb.slotIndex === assignedSlot
+      );
+      if (slotMatch) return slotMatch;
+      const slotFallback = speakerThumbnails.find(
+        (thumb) => thumb.slotIndex === assignedSlot
+      );
+      if (slotFallback) return slotFallback;
+    }
+    return (
+      speakerThumbnails.find((thumb) => thumb.speakerId === speakerId) ?? null
+    );
+  };
+  const getSpeakerPreviewThumbnails = (speakerId: string) => {
+    const thumbnail = resolveSpeakerThumbnail(speakerId);
+    return thumbnail ? [thumbnail] : [];
+  };
+  const buildSpeakerPreviews = (words: TranscriptWord[]): SpeakerPreview[] => {
+    const ordered: string[] = [];
+    const seen = new Set<string>();
+    words.forEach((word) => {
+      const speakerId = word.speaker_id ?? "unknown";
+      if (!seen.has(speakerId)) {
+        seen.add(speakerId);
+        ordered.push(speakerId);
+      }
+    });
+    return ordered.map((speakerId, index) => ({
+      id: speakerId,
+      label: resolveSpeakerLabel(speakerId, index),
+      thumbnails: getSpeakerPreviewThumbnails(speakerId),
+    }));
+  };
+  const conceptSpeakerPreviews: Record<string, SpeakerPreview[]> = {};
+  conceptChoices.forEach((concept) => {
+    const trimmedWords = concept.trimmed_words ?? [];
+    const resolvedWords = mapTrimmedWordsToSourceOrFallback(
+      currentTranscriptWords,
+      trimmedWords
+    );
+    conceptSpeakerPreviews[concept.id] = buildSpeakerPreviews(resolvedWords);
+  });
+  const activeSpeakerPreview = (() => {
+    if (!showResultStage || !timelineSegments.length) return null;
+    const clampedTime = Math.max(0, Math.min(timelinePosition, timelineDuration));
+    let segmentIndex = timelineSegments.findIndex(
+      (segment) => clampedTime >= segment.start && clampedTime < segment.end
+    );
+    if (segmentIndex === -1 && timelineSegments.length) {
+      const lastIndex = timelineSegments.length - 1;
+      if (clampedTime >= timelineSegments[lastIndex].end) {
+        segmentIndex = lastIndex;
+      }
+    }
+    if (segmentIndex === -1) return null;
+    const clipId = baseClipIdsRef.current[segmentIndex];
+    if (typeof clipId !== "number") return null;
+    const speakerId = clipSpeakerMapRef.current.get(clipId) ?? null;
+    if (!speakerId) return null;
+    return {
+      id: speakerId,
+      label: resolveSpeakerLabel(speakerId),
+      thumbnail: resolveSpeakerThumbnail(speakerId),
+    };
+  })();
 
   const handleAspectRatioChange = (ratioId: string) => {
     setTargetAspectRatioId(ratioId);
@@ -2285,7 +6273,30 @@ export default function App() {
           textHookDurationRef.current
         );
       }
-      void applyFaceAwareCropping(undefined, ratioId);
+      if (
+        speakerTemplateIdRef.current === "solo"
+      ) {
+        clearTemplateLayout();
+        void applySoloFaceCropping();
+      } else if (
+        speakerTemplateIdRef.current !== "none" &&
+        canApplySpeakerTemplate()
+      ) {
+        void applySpeakerTemplate(speakerTemplateIdRef.current);
+      } else {
+        const speakerFallbackFaces = buildSpeakerAssignments(
+          speakerAssignmentsRef.current,
+          speakerFaceSlots,
+          primaryFaceSlots
+        );
+        void applyFaceAwareCropping(
+          undefined,
+          ratioId,
+          clipSpeakerMapRef.current,
+          speakerAssignmentsRef.current,
+          speakerFallbackFaces
+        );
+      }
     }
   };
 
@@ -2302,6 +6313,43 @@ export default function App() {
       applyTextHookVisibility(false);
     }
   }, [applyTextHook, applyTextHookVisibility, textHookEnabled]);
+
+  useEffect(() => {
+    if (!showResultStage) {
+      clearTemplateLayout();
+      return;
+    }
+    if (speakerTemplateId === "solo") {
+      clearTemplateLayout();
+      void applySoloFaceCropping();
+    } else if (speakerTemplateId !== "none" && canApplySpeakerTemplate()) {
+      void applySpeakerTemplate(speakerTemplateId);
+    } else {
+      clearTemplateLayout();
+      const speakerFallbackFaces = buildSpeakerAssignments(
+        speakerAssignmentsRef.current,
+        speakerFaceSlots,
+        primaryFaceSlots
+      );
+      void applyFaceAwareCropping(
+        undefined,
+        targetAspectRatioId,
+        clipSpeakerMapRef.current,
+        speakerAssignmentsRef.current,
+        speakerFallbackFaces
+      );
+    }
+  }, [
+    applySpeakerTemplate,
+    applyFaceAwareCropping,
+    applySoloFaceCropping,
+    clearTemplateLayout,
+    showResultStage,
+    speakerAssignments,
+    speakerSnippets,
+    speakerTemplateId,
+    targetAspectRatioId,
+  ]);
 
   useEffect(() => {
     if (!showResultStage || !isEngineReady) return;
@@ -2387,6 +6435,9 @@ export default function App() {
   const captionDebugText = captionDebug
     ? JSON.stringify(captionDebug, null, 2)
     : null;
+  const geminiFaceDebugText = geminiFaceDebug ?? null;
+  const geminiFaceThumbnailUrl = geminiFaceThumbnail ?? null;
+  const debugExportMetricsText = debugExportMetrics ?? null;
   const heroCopy = showProcessingStage
     ? {
         title: "Hang on, we're processing your video.",
@@ -2406,7 +6457,7 @@ export default function App() {
   return (
     <ThemeProvider>
       <div className="flex min-h-screen flex-col bg-background">
-        <AppHeader />
+        <AppHeader onLogoClick={handleRemoveVideo} />
 
         <main className="flex-1">
           <div className="container py-10">
@@ -2447,9 +6498,6 @@ export default function App() {
                       aspectRatioId={targetAspectRatioId}
                       onAspectRatioChange={handleAspectRatioChange}
                       showAspectRatio={showTrimStage}
-                      speechProvider={speechProvider}
-                      onSpeechProviderChange={setSpeechProvider}
-                      showSpeechProvider={showTrimStage}
                       showOptions={!showUploadStage}
                       showAction={!showUploadStage}
                       layout={showUploadStage ? "full" : "split"}
@@ -2473,13 +6521,93 @@ export default function App() {
                       }
                       previewFooter={
                         showTrimStage ? (
-                          <button
-                            type="button"
-                            onClick={handleRemoveVideo}
-                            className="text-xs font-medium text-muted-foreground underline underline-offset-4 transition hover:text-foreground"
-                          >
-                            Remove video
-                          </button>
+                          <div className="flex flex-col items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={handleRemoveVideo}
+                              className="text-xs font-medium text-muted-foreground underline underline-offset-4 transition hover:text-foreground"
+                            >
+                              Remove video
+                            </button>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              onClick={handleGeminiFaceDebug}
+                              disabled={isFaceDebugLoading}
+                            >
+                              {isFaceDebugLoading
+                                ? "Detecting faces..."
+                                : "Debug speaker boxes"}
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              onClick={handleTinyDebugExport}
+                              disabled={isFaceDebugLoading}
+                            >
+                              Tiny export test
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="secondary"
+                              size="sm"
+                              onClick={() =>
+                                setIsImportScriptOpen((prev) => !prev)
+                              }
+                            >
+                              {isImportScriptOpen
+                                ? "Hide import script"
+                                : "Import preload script"}
+                            </Button>
+                            {isImportScriptOpen && (
+                              <div className="w-full max-w-md rounded-lg border bg-muted/20 p-3 text-left">
+                                <label className="text-xs font-medium text-foreground">
+                                  Preload script
+                                </label>
+                                <textarea
+                                  value={importScriptText}
+                                  onChange={(event) => {
+                                    setImportScriptText(event.target.value);
+                                    if (importScriptError) {
+                                      setImportScriptError(null);
+                                    }
+                                  }}
+                                  placeholder="Paste the exported preload script JSON here."
+                                  className="mt-2 h-28 w-full resize-none rounded-md border bg-background px-3 py-2 text-xs text-foreground shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
+                                />
+                                {importScriptError && (
+                                  <p className="mt-2 text-xs text-destructive">
+                                    {importScriptError}
+                                  </p>
+                                )}
+                                <div className="mt-3 flex items-center justify-end gap-2">
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => {
+                                      setIsImportScriptOpen(false);
+                                      setImportScriptError(null);
+                                    }}
+                                  >
+                                    Cancel
+                                  </Button>
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    onClick={handleImportPreloadScript}
+                                    disabled={isImportingScript}
+                                  >
+                                    {isImportingScript
+                                      ? "Importing..."
+                                      : "Apply script"}
+                                  </Button>
+                                </div>
+                              </div>
+                            )}
+                          </div>
                         ) : null
                       }
                     />
@@ -2503,7 +6631,28 @@ export default function App() {
                       autoProcessingError={autoProcessingError}
                       analysisStage={analysisStage}
                       analysisEstimate={analysisEstimate}
+                      preloadSnippets={speakerSnippets}
+                      preloadThumbnails={speakerThumbnails}
+                      speakerQuestion={speakerQuestion}
+                      hidePreloadDetails={hidePreloadThumbnails}
                     />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="mt-3 w-full"
+                      onClick={() => setIsDebugOpen(true)}
+                    >
+                      View debug details
+                    </Button>
+                    {showProcessingStage && (
+                      <div className="mt-4 h-0 overflow-hidden" aria-hidden="true">
+                        <div
+                          ref={engineCanvasContainerRef}
+                          className="h-0 w-full overflow-hidden"
+                        />
+                      </div>
+                    )}
                   </div>
 
                   <div
@@ -2522,11 +6671,17 @@ export default function App() {
                           isApplyingConcept={isApplyingConcept}
                           onSelect={handleConceptSelection}
                           onShortenAnother={handleRemoveVideo}
+                          speakerPreviews={conceptSpeakerPreviews}
                         />
                       ) : (
-                        <div className="rounded-xl border bg-card p-4 text-sm text-muted-foreground">
-                          Trim applied. No alternate highlight options were
-                          returned for this edit.
+                        <div className="rounded-xl border bg-card p-4">
+                          <p className="text-sm font-medium text-foreground">
+                            Results
+                          </p>
+                          <p className="mt-2 text-sm text-muted-foreground">
+                            Trim applied. No alternate highlight options were
+                            returned for this edit.
+                          </p>
                           <div className="mt-3 border-t pt-3">
                             <button
                               type="button"
@@ -2535,6 +6690,24 @@ export default function App() {
                             >
                               Shorten another video
                             </button>
+                          </div>
+                        </div>
+                      )}
+                      {canShowTemplate && (
+                        <div className="rounded-xl border bg-card p-4">
+                          <p className="text-sm font-medium text-foreground">
+                            Template
+                          </p>
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            Choose whether to crop tightly around the active
+                            speaker.
+                          </p>
+                          <div className="mt-3">
+                            <TemplatePicker
+                              options={SPEAKER_TEMPLATE_OPTIONS}
+                              value={speakerTemplateId}
+                              onChange={setSpeakerTemplateId}
+                            />
                           </div>
                         </div>
                       )}
@@ -2620,7 +6793,12 @@ export default function App() {
                         className="w-full"
                         onClick={() => setIsDebugOpen(true)}
                         disabled={
-                          !transcriptDebug && !geminiDebug && !captionDebug
+                          !transcriptDebug &&
+                          !geminiDebug &&
+                          !geminiFaceDebug &&
+                          !geminiFaceThumbnail &&
+                          !debugExportMetrics &&
+                          !captionDebug
                         }
                       >
                         View debug details
@@ -2674,6 +6852,32 @@ export default function App() {
                         }
                       }}
                     />
+                    {activeSpeakerPreview && (
+                      <div className="flex items-center gap-3 rounded-lg border bg-card/60 px-3 py-2 text-sm">
+                        <div className="h-10 w-10 overflow-hidden rounded-full border bg-background">
+                          {activeSpeakerPreview.thumbnail ? (
+                            <img
+                              src={activeSpeakerPreview.thumbnail.src}
+                              alt={activeSpeakerPreview.label}
+                              className="h-full w-full object-cover"
+                              loading="lazy"
+                            />
+                          ) : (
+                            <div className="flex h-full w-full items-center justify-center text-[10px] text-muted-foreground">
+                              No face
+                            </div>
+                          )}
+                        </div>
+                        <div>
+                          <p className="text-[11px] text-muted-foreground">
+                            Speaking now
+                          </p>
+                          <p className="text-sm font-medium text-foreground">
+                            {activeSpeakerPreview.label}
+                          </p>
+                        </div>
+                      </div>
+                    )}
                     {exportError && (
                       <div className="rounded-xl border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
                         {exportError}
@@ -2698,7 +6902,13 @@ export default function App() {
           onClose={() => setIsDebugOpen(false)}
           transcript={transcriptDebugText}
           gemini={geminiDebug}
+          geminiFaceBoxes={geminiFaceDebugText}
+          geminiFaceThumbnail={geminiFaceThumbnailUrl}
+          debugExportMetrics={debugExportMetricsText}
           captions={captionDebugText}
+          preloadScript={preloadScript}
+          onExportPreloadScript={handleExportPreloadScript}
+          isExportingPreloadScript={isPreloadScriptExporting}
         />
 
         {hasVideo && !showProcessingStage && (

@@ -62,10 +62,21 @@ const config: Config = {
           from: { height: "var(--radix-accordion-content-height)" },
           to: { height: "0" },
         },
+        "speaker-pulse": {
+          "0%, 100%": {
+            transform: "scale(1)",
+            boxShadow: "0 0 0 0 rgba(59,130,246,0.35)",
+          },
+          "50%": {
+            transform: "scale(1.03)",
+            boxShadow: "0 0 16px 4px rgba(59,130,246,0.55)",
+          },
+        },
       },
       animation: {
         "accordion-down": "accordion-down 0.2s ease-out",
         "accordion-up": "accordion-up 0.2s ease-out",
+        "speaker-pulse": "speaker-pulse 1.4s ease-in-out infinite",
       },
     },
   },

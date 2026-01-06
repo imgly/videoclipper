@@ -7,13 +7,15 @@ const normalizeWordText = (text: string | undefined | null) =>
 export const buildKeepRangesFromWords = (
   sourceWords: TranscriptWord[],
   refinedWords: TranscriptWord[],
-  totalDuration: number
+  totalDuration: number,
+  minRangeDurationSeconds = 0
 ): TimeRange[] => {
   if (!sourceWords.length || !refinedWords.length) return [];
   const clampedDuration = Math.max(
     totalDuration,
     sourceWords[sourceWords.length - 1]?.end ?? 0
   );
+  const minDuration = Math.max(0.01, minRangeDurationSeconds);
   const normalizedSource = sourceWords.map((word, index) => ({
     index,
     start: Math.max(0, word.start),
@@ -61,5 +63,5 @@ export const buildKeepRangesFromWords = (
       start: Math.max(0, Math.min(range.start, clampedDuration)),
       end: Math.max(0, Math.min(range.end, clampedDuration)),
     }))
-    .filter((range) => range.end - range.start > 0.01);
+    .filter((range) => range.end - range.start >= minDuration);
 };

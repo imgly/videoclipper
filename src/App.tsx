@@ -2,6 +2,15 @@
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import {
+  Input,
+  Output,
+  Conversion,
+  BlobSource,
+  BufferTarget,
+  WavOutputFormat,
+  ALL_FORMATS,
+} from "mediabunny";
+import {
   buildTranscriptWordsFromText,
   extractOpenAITranscriptWords,
   extractTranscriptWords,
@@ -3352,8 +3361,18 @@ export default function App() {
     }
 
     const blobUrl = URL.createObjectURL(file);
+    const opfs = await navigator.storage.estimate();
+    const directory = await navigator.storage.getDirectory();
+    const opfsFile = await directory.getFileHandle(file.name, { create: true });
+    const stream = await opfsFile.createWritable();
+    await stream.write(file);
+    await stream.close();
 
-    const videoBlockId = await engine.block.addVideo(blobUrl, 1920, 1080);
+    const videoURL = "opfs://" + file.name;
+
+
+    const videoBlockId = await engine.block.addVideo(videoURL, 1920, 1080);
+
     disableBlockHighlight(engine, videoBlockId);
     if (pageRef.current && engine.block.isValid(pageRef.current)) {
       engine.block.appendChild(pageRef.current, videoBlockId);
@@ -3362,7 +3381,9 @@ export default function App() {
         const videoFillId = engine.block.getFill(videoBlockId);
         if (videoFillId) {
           try {
-            await engine.block.forceLoadAVResource(videoFillId);
+            // await engine.block.forceLoadAVResource(videoFillId);
+            // sleep 500ms
+            await new Promise(resolve => setTimeout(resolve, 500));
           } catch (loadError) {
             console.warn("Failed to eagerly load video resource", loadError);
           }
@@ -3449,25 +3470,6 @@ export default function App() {
     } catch (error) {
       console.warn("Failed to create video template", error);
       videoTemplateRef.current = null;
-    }
-
-    try {
-      const videoFillBlock = engine.block.getFill(videoBlockId);
-      const trackCount = engine.block.getAudioTrackCountFromVideo(videoFillBlock);
-
-      if (trackCount > 0) {
-        const audioBlockId = engine.block.createAudioFromVideo(videoFillBlock, 0);
-        if (pageRef.current && engine.block.isValid(pageRef.current)) {
-          engine.block.appendChild(pageRef.current, audioBlockId);
-        }
-        audioBlockRef.current = audioBlockId;
-        setAudioPlaybackMuted(false, audioBlockId);
-        await syncAudioBlockDuration(engine, audioBlockId);
-      } else {
-        console.warn("Selected video has no audio tracks.");
-      }
-    } catch (error) {
-      console.error("Failed to prepare audio track", error);
     }
   };
 
@@ -4665,7 +4667,7 @@ export default function App() {
       setAutoProcessingError("Upload a video first.");
       return;
     }
-    if (!engineRef.current || !audioBlockRef.current) {
+    if (!engineRef.current) {
       setAutoProcessingError(
         "Video is still preparing. Please try again in a moment."
       );
@@ -4985,77 +4987,37 @@ export default function App() {
   };
 
   const extractAudioWithEngine = async (): Promise<Blob> => {
-    const engine = engineRef.current;
-    const audioBlock = audioBlockRef.current;
-    if (!engine || !audioBlock) {
-      throw new Error("Audio track is not ready yet. Upload a video first.");
+    // Bypass engine.block.exportAudio due to a bug - extract audio directly using mediabunny
+    if (!videoFile) {
+      throw new Error("No video file available. Upload a video first.");
     }
 
-    let wasMuted = false;
-    try {
-      wasMuted = engine.block.isMuted(audioBlock);
-      engine.block.setMuted(audioBlock, false);
-      engine.block.setBool(audioBlock, "playback/muted", false);
-    } catch (error) {
-      console.warn("Failed to toggle audio mute state", error);
-    }
+    setProgress(10);
 
-    const pageId = pageRef.current;
-    let previousPageDuration: number | null = null;
-    if (pageId && engine.block.isValid(pageId)) {
-      try {
-        previousPageDuration = engine.block.getDuration(pageId);
-        const desiredDuration = sourceVideoDuration || previousPageDuration;
-        if (desiredDuration && desiredDuration > 0) {
-          engine.block.setDuration(pageId, desiredDuration);
-        }
-      } catch (error) {
-        console.warn("Failed to adjust page duration for audio export", error);
-      }
-    }
+    const input = new Input({
+      source: new BlobSource(videoFile),
+      formats: ALL_FORMATS,
+    });
 
-    const duration = await ensureAudioDuration(engine, audioBlock);
-    if (!duration || duration <= 0) {
-      throw new Error("Unable to determine audio duration for export.");
-    }
+    const target = new BufferTarget();
+    const output = new Output({
+      format: new WavOutputFormat(),
+      target,
+    });
 
-    try {
-      const exportedBlob = await engine.block.exportAudio(audioBlock, {
-        mimeType: "audio/mp4",
-        sampleRate: 48000,
-        numberOfChannels: 2,
-        timeOffset: 0.0,
-        duration,
-        onProgress: (
-          _renderedFrames: number,
-          encodedFrames: number,
-          totalFrames: number
-        ) => {
-          if (!totalFrames) {
-            setProgress(0);
-            return;
-          }
-          const percentage = Math.round((encodedFrames / totalFrames) * 100);
-          setProgress(Math.min(100, Math.max(0, percentage)));
-        },
-      });
-      return exportedBlob;
-    } finally {
-      try {
-        engine.block.setMuted(audioBlock, wasMuted);
-        engine.block.setBool(audioBlock, "playback/muted", wasMuted);
-      } catch (error) {
-        console.warn("Failed to restore audio mute state", error);
-      }
-      if (pageId && previousPageDuration !== null) {
-        try {
-          engine.block.setDuration(pageId, previousPageDuration);
-          updateTimelineDuration(engine);
-        } catch (error) {
-          console.warn("Failed to restore page duration after export", error);
-        }
-      }
+    setProgress(30);
+
+    const conversion = await Conversion.init({ input, output });
+
+    setProgress(50);
+    await conversion.execute();
+    setProgress(100);
+
+    const buffer = target.buffer;
+    if (!buffer) {
+      throw new Error("Failed to extract audio: no buffer produced");
     }
+    return new Blob([buffer], { type: "audio/wav" });
   };
 
   const setVideoTrackAutoManage = (
@@ -6385,7 +6347,6 @@ export default function App() {
     autoProcessing ||
     !videoFile ||
     !isEngineReady ||
-    !audioBlockRef.current ||
     isTranscribing ||
     isExtracting;
 

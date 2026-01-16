@@ -49,7 +49,9 @@ const PreviewOutline = ({
     return (
       <div className="relative h-12 w-12">
         <div className={`absolute inset-2 ${outline}`} />
-        <div className="absolute inset-2 rotate-45 border-t-2 border-dashed border-muted-foreground/60" />
+        <div className="absolute left-2 right-2 top-1/2 flex -translate-y-1/2 items-center justify-center">
+          <div className="h-[1.5px] w-full rotate-45 bg-muted-foreground/60" />
+        </div>
       </div>
     );
   }
@@ -108,14 +110,14 @@ const TemplatePicker = ({
           className={cn(
             "flex w-24 flex-col items-center gap-2 rounded-xl border px-3 py-3 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
             isActive
-              ? "border-primary bg-primary/5 text-foreground"
+              ? "border-primary text-foreground"
               : "border-muted text-muted-foreground hover:border-muted-foreground/60",
             disabled && "pointer-events-none opacity-50"
           )}
           aria-pressed={isActive}
           disabled={disabled}
         >
-          <div className="flex h-12 w-12 items-center justify-center rounded-lg bg-muted/30">
+          <div className="flex h-12 w-12 items-center justify-center">
             <PreviewOutline templateId={option.id} isActive={isActive} />
           </div>
           <span>{option.label}</span>

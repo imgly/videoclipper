@@ -9,7 +9,7 @@ export const SPEAKER_TEMPLATE_OPTIONS: SpeakerTemplateOption[] = [
   {
     id: "solo",
     label: "Solo",
-    description: "Crop tightly around the active speaker.",
+    description: "Center the active speaker in the frame.",
   },
   {
     id: "multi",

@@ -51,6 +51,7 @@
     "vitest": "^4.0.8"
   },
   "overrides": {
-    "node-fetch": "^2.6.12"
+    "node-fetch": "^2.6.12",
+    "@tensorflow/tfjs-core": "1.7.4"
   }
 }

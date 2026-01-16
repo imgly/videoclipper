@@ -76,6 +76,22 @@ export const useCesdkEngine = (options: UseCesdkEngineOptions = {}) => {
 
         engineRef.current = engine;
         pageRef.current = page;
+
+        // Clean OPFS directory on initialization
+        try {
+          const directory = await navigator.storage.getDirectory();
+          const entries = directory.values();
+          for await (const entry of entries) {
+            try {
+              await directory.removeEntry(entry.name);
+            } catch (removeError) {
+              console.warn(`Failed to remove OPFS entry: ${entry.name}`, removeError);
+            }
+          }
+        } catch (opfsError) {
+          console.warn("Failed to clean OPFS directory", opfsError);
+        }
+
         setIsEngineReady(true);
       } catch (error) {
         if (isCancelled) return;

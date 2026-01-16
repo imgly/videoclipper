@@ -1,4 +1,5 @@
 export const CESDK_LICENSE_KEY =
+  process.env.NEXT_PUBLIC_CESDK_LICENSE_KEY ||
   "A-O53TWXK5bfyconUx7e53S5YU7DzjuGpMAH5vvKjLd0zBa6IhsoF7zChy1uCVbj";
 export const ENGINE_ASSET_BASE_URL = "/cesdk-engine";
 export const EDITOR_ASSET_BASE_URL = "/cesdk-js/assets";

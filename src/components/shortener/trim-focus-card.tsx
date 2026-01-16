@@ -123,7 +123,7 @@ const TrimFocusCard = ({
           Processing...
         </>
       ) : (
-        "Start automatic edit"
+        "Start automatic clipping"
       )}
     </Button>
   ) : null;

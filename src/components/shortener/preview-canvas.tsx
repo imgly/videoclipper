@@ -24,6 +24,7 @@ type PreviewCanvasProps = {
   onExport?: () => void;
   showControls?: boolean;
   isExporting?: boolean;
+  isExtracting?: boolean;
   aspectRatio?: number;
   className?: string;
   enableUpload?: boolean;
@@ -53,6 +54,7 @@ const PreviewCanvas = ({
   onExport,
   showControls = false,
   isExporting = false,
+  isExtracting = false,
   aspectRatio = 16 / 9,
   className,
   enableUpload = true,
@@ -67,7 +69,7 @@ const PreviewCanvas = ({
   const shouldShowPlayback =
     Boolean(videoFile) && showPlaybackControls && Boolean(onTogglePlayback);
   const isPlaybackDisabled = !isEngineReady || !timelineDuration;
-  const shouldShowPreview = Boolean(videoFile) && !isFaceCropPending;
+  const shouldShowPreview = Boolean(videoFile) && !isFaceCropPending && !isExtracting;
   const formatTime = (value: number) => {
     if (!Number.isFinite(value) || value <= 0) return "0:00.00";
     const minutes = Math.floor(value / 60);
@@ -140,6 +142,12 @@ const PreviewCanvas = ({
             : "opacity-0 pointer-events-none"
         }`}
       />
+      {videoFile && isExtracting && (
+        <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center gap-2 bg-background/70 text-muted-foreground">
+          <Loader2 className="h-5 w-5 animate-spin" />
+          <span className="text-sm">Loading video...</span>
+        </div>
+      )}
       {videoFile && isFaceCropPending && (
         <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-background/70 text-muted-foreground">
           <Loader2 className="h-5 w-5 animate-spin" />

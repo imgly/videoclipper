@@ -65,3 +65,18 @@ export const buildKeepRangesFromWords = (
     }))
     .filter((range) => range.end - range.start >= minDuration);
 };
+
+export const calculateDurationFromWords = (
+  sourceWords: TranscriptWord[],
+  refinedWords: TranscriptWord[],
+  totalDuration: number,
+  minRangeDurationSeconds = 1
+): number => {
+  const ranges = buildKeepRangesFromWords(
+    sourceWords,
+    refinedWords,
+    totalDuration,
+    minRangeDurationSeconds
+  );
+  return ranges.reduce((sum, range) => sum + (range.end - range.start), 0);
+};

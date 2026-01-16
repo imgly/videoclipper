@@ -21,13 +21,6 @@ export const transcribeWithOpenAI = async (
   audioBlob: Blob,
   options: OpenAITranscriptionOptions = {}
 ): Promise<TranscriptionResult> => {
-  const apiKey = process.env.NEXT_PUBLIC_OPENAI_API_KEY;
-  if (!apiKey) {
-    throw new Error(
-      "Missing OpenAI API key. Set NEXT_PUBLIC_OPENAI_API_KEY in your environment."
-    );
-  }
-
   const modelId =
     options.model ??
     process.env.NEXT_PUBLIC_OPENAI_TRANSCRIPTION_MODEL ??
@@ -42,64 +35,26 @@ export const transcribeWithOpenAI = async (
     responseFormat = "json";
   }
 
-  const shouldRequestWordTimestamps =
-    allowWordTimestamps && responseFormat === "verbose_json";
-  const buildFormData = (format: string, includeTimestamps: boolean) => {
-    const formData = new FormData();
-    formData.append("file", audioBlob, "extracted-audio.mp4");
-    formData.append("model", modelId);
-    formData.append("response_format", format);
-    if (includeTimestamps) {
-      formData.append("timestamp_granularities[]", "word");
-    }
-    return formData;
-  };
-  const requestTranscription = async (
-    format: string,
-    includeTimestamps: boolean
-  ): Promise<OpenAITranscriptionAttempt> => {
-    const response = await fetch(
-      "https://api.openai.com/v1/audio/transcriptions",
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          Accept: "application/json",
-        },
-        body: buildFormData(format, includeTimestamps),
-      }
-    );
-    if (!response.ok) {
-      return {
-        ok: false,
-        message: await response.text(),
-      };
-    }
-    return { ok: true, data: (await response.json()) as OpenAITranscriptResponse };
-  };
+  // Build request to our secure API route
+  const formData = new FormData();
+  formData.append("audio", audioBlob, "extracted-audio.mp4");
+  formData.append("model", modelId);
+  formData.append("responseFormat", responseFormat);
+  formData.append("enableWordTimestamps", String(enableWordTimestamps));
 
-  let attempt = await requestTranscription(
-    responseFormat,
-    shouldRequestWordTimestamps
-  );
-  if (!attempt.ok && shouldRequestWordTimestamps) {
-    console.warn(
-      "OpenAI transcription rejected word timestamps; retrying without timestamps."
-    );
-    attempt = await requestTranscription("json", false);
-  }
-  if (!attempt.ok) {
+  // Call our secure API route instead of OpenAI directly
+  const response = await fetch("/api/transcribe-openai", {
+    method: "POST",
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
     throw new Error(
-      attempt.message || "OpenAI transcription request was not successful."
+      error.detail || error.error || "OpenAI transcription request failed."
     );
   }
 
-  const result = attempt.data;
-  console.debug("OpenAI transcription response", result);
-  const transcriptText = pickOpenAITranscriptText(result);
-  if (!transcriptText) {
-    throw new Error("OpenAI transcription response was empty.");
-  }
-
-  return { transcript: transcriptText, rawResponse: result };
+  const result = await response.json();
+  return { transcript: result.transcript, rawResponse: result.rawResponse };
 };

@@ -88,6 +88,8 @@ const FACE_CROP_RECT_TOP_BIAS = 0.8;
 const FACE_CROP_CORNER_RADIUS_RATIO = 0.18;
 const FACE_CROP_CORNER_RADIUS_MIN = 16;
 const FACE_CROP_CORNER_RADIUS_MAX = 72;
+const FACE_CROP_CORNER_RADIUS_RATIO_ACTIVE = 0.08; // Less rounded for active speaker
+const FACE_CROP_CORNER_RADIUS_RATIO_THUMB = 0.5; // Circular thumbnails
 const FACE_OVERLAY_COLORS = [
   { r: 0.95, g: 0.32, b: 0.32, a: 0.22 },
   { r: 0.23, g: 0.64, b: 0.95, a: 0.22 },
@@ -261,6 +263,7 @@ export default function App() {
     useState(false);
   const [hidePreloadThumbnails, setHidePreloadThumbnails] = useState(false);
   const [isFaceCropPending, setIsFaceCropPending] = useState(false);
+  const [isCreatingVideo, setIsCreatingVideo] = useState(false);
   const [captionsEnabled, setCaptionsEnabled] = useState(true);
   const [textHookEnabled, setTextHookEnabled] = useState(true);
   const [transcriptDebug, setTranscriptDebug] = useState<
@@ -385,6 +388,7 @@ export default function App() {
     setAnalysisStage(null);
     setAnalysisStartAt(null);
     setIsFaceCropPending(false);
+    setIsCreatingVideo(false);
     setCaptionsEnabled(true);
     setTextHookEnabled(true);
     setTranscriptDebug(null);
@@ -1554,10 +1558,10 @@ export default function App() {
     if (templateId === "solo") {
       return {
         active: {
-          x: 0,
-          y: 0,
-          width: sceneWidth,
-          height: sceneHeight,
+          x: margin,
+          y: margin,
+          width: Math.max(0, sceneWidth - margin * 2),
+          height: Math.max(0, sceneHeight - margin * 2),
         },
         thumbs: [],
       };
@@ -1565,18 +1569,19 @@ export default function App() {
 
     if (templateId === "multi") {
       const thumbsHeight = sceneHeight * 0.26;
+      const thumbGap = gap * 0.5; // Reduced gap to move thumbnails up
       const active: LayoutSlot = {
         x: margin,
         y: margin,
         width: Math.max(0, sceneWidth - margin * 2),
         height: Math.max(
           0,
-          sceneHeight - margin * 2 - gap - thumbsHeight
+          sceneHeight - margin * 2 - thumbGap - thumbsHeight
         ),
       };
       const thumbsArea: LayoutSlot = {
         x: margin,
-        y: active.y + active.height + gap,
+        y: active.y + active.height + thumbGap,
         width: Math.max(0, sceneWidth - margin * 2),
         height: thumbsHeight,
       };
@@ -1660,13 +1665,6 @@ export default function App() {
   };
 
   const ensureFaceApiBackend = async (faceapi: FaceApiModule) => {
-    try {
-      await import("@tensorflow/tfjs-core/dist/kernels/backend_webgl");
-      await import("@tensorflow/tfjs-core/dist/kernels/backend_cpu");
-    } catch (error) {
-      console.warn("[FaceCrop] Failed to load TensorFlow.js backends", error);
-      return false;
-    }
     const trySetBackend = async (name: "webgl" | "cpu") => {
       try {
         await faceapi.tf.setBackend(name);
@@ -2315,6 +2313,11 @@ export default function App() {
       try {
         const modelsReady = await loadFaceModels();
         if (!modelsReady || runId !== faceCropRunIdRef.current) return;
+        const sceneWidth = engine.block.getWidth(pageId);
+        const sceneHeight = engine.block.getHeight(pageId);
+        if (!Number.isFinite(sceneWidth) || !Number.isFinite(sceneHeight)) return;
+        const layout = buildTemplateLayout("solo", sceneWidth, sceneHeight, 1);
+        const slot = layout.active;
         const ids =
           clipIds ??
           (videoTrackRef.current && engine.block.isValid(videoTrackRef.current)
@@ -2345,16 +2348,15 @@ export default function App() {
             fallbackFaces.set(speakerId, face);
           }
         });
-        await renderFaceOverlaysForClips(ids, runId);
         for (const clipId of ids) {
           if (runId !== faceCropRunIdRef.current) return;
           if (!engine.block.isValid(clipId)) continue;
-          let shapeId: number | null = null;
           try {
             engine.block.setClipped(clipId, true);
           } catch (error) {
             console.warn("Failed to enable clipping on solo clip", error);
           }
+          let shapeId: number | null = null;
           try {
             if (engine.block.supportsShape(clipId)) {
               shapeId = engine.block.createShape("rect");
@@ -2363,16 +2365,10 @@ export default function App() {
           } catch (error) {
             console.warn("Failed to ensure solo clip shape", error);
           }
-          if (runId !== faceCropRunIdRef.current) return;
-          if (!engine.block.isValid(clipId)) continue;
           try {
             if (engine.block.supportsContentFillMode(clipId)) {
               engine.block.setContentFillMode(clipId, "Crop");
             }
-          } catch (error) {
-            console.warn("Failed to set solo clip fill mode", error);
-          }
-          try {
             const fillId = engine.block.getFill(clipId);
             if (
               fillId &&
@@ -2382,7 +2378,7 @@ export default function App() {
               engine.block.setContentFillMode(fillId, "Crop");
             }
           } catch (error) {
-            console.warn("Failed to set solo fill mode", error);
+            console.warn("Failed to set solo clip fill mode", error);
           }
           try {
             engine.block.resetCrop(clipId);
@@ -2412,40 +2408,41 @@ export default function App() {
           if (runId !== faceCropRunIdRef.current) return;
           if (!engine.block.isValid(clipId)) continue;
           if (face) {
-            let blockWidth = 0;
-            let blockHeight = 0;
+            let sourceWidth = 0;
+            let sourceHeight = 0;
             try {
-              blockWidth = engine.block.getWidth(clipId);
-              blockHeight = engine.block.getHeight(clipId);
+              sourceWidth = engine.block.getWidth(clipId);
+              sourceHeight = engine.block.getHeight(clipId);
             } catch (error) {
               console.warn("Failed to read clip size for solo crop", error);
             }
             if (
-              Number.isFinite(blockWidth) &&
-              Number.isFinite(blockHeight) &&
-              blockWidth > 0 &&
-              blockHeight > 0
+              Number.isFinite(sourceWidth) &&
+              Number.isFinite(sourceHeight) &&
+              sourceWidth > 0 &&
+              sourceHeight > 0
             ) {
               const cropRect = scaleCropRect(
-                buildFacePixelCropRect(face, blockWidth, blockHeight),
+                buildFacePixelCropRect(face, sourceWidth, sourceHeight),
                 FACE_CROP_RECT_SCALE,
-                blockWidth,
-                blockHeight,
+                sourceWidth,
+                sourceHeight,
                 FACE_CROP_RECT_EXTRA_WIDTH,
                 FACE_CROP_RECT_EXTRA_HEIGHT,
                 FACE_CROP_RECT_TOP_BIAS
-              );
-              const radius = clampValue(
-                Math.min(cropRect.width, cropRect.height) *
-                  FACE_CROP_CORNER_RADIUS_RATIO,
-                FACE_CROP_CORNER_RADIUS_MIN,
-                FACE_CROP_CORNER_RADIUS_MAX
               );
               const applied = applyRectCropScaleTranslation(
                 engine,
                 clipId,
                 cropRect,
                 { resizeToCrop: true }
+              );
+              // Use active speaker radius (same as multi layout)
+              const radius = clampValue(
+                Math.min(slot.width, slot.height) *
+                  FACE_CROP_CORNER_RADIUS_RATIO_ACTIVE,
+                FACE_CROP_CORNER_RADIUS_MIN,
+                FACE_CROP_CORNER_RADIUS_MAX
               );
               if (shapeId || radius) {
                 applyRoundedCorners(engine, shapeId ?? 0, clipId, radius);
@@ -2455,6 +2452,37 @@ export default function App() {
                   engine.block.resetCrop(clipId);
                 } catch (error) {
                   console.warn("Failed to reset solo crop state", error);
+                }
+              }
+              // Position and scale to fit within the slot (like multi layout)
+              let clipWidth = 0;
+              let clipHeight = 0;
+              try {
+                clipWidth = engine.block.getWidth(clipId);
+                clipHeight = engine.block.getHeight(clipId);
+              } catch (error) {
+                console.warn("Failed to read cropped clip size", error);
+              }
+              if (
+                Number.isFinite(clipWidth) &&
+                Number.isFinite(clipHeight) &&
+                clipWidth > 0 &&
+                clipHeight > 0
+              ) {
+                const scale = Math.min(
+                  slot.width / clipWidth,
+                  slot.height / clipHeight
+                );
+                const scaledWidth = clipWidth * scale;
+                const scaledHeight = clipHeight * scale;
+                const posX = slot.x + (slot.width - scaledWidth) / 2;
+                const posY = slot.y + (slot.height - scaledHeight) / 2;
+                try {
+                  engine.block.setWidth(clipId, scaledWidth);
+                  engine.block.setHeight(clipId, scaledHeight);
+                  engine.block.setPosition(clipId, posX, posY);
+                } catch (error) {
+                  console.warn("Failed to position solo clip in slot", error);
                 }
               }
             }
@@ -2480,7 +2508,6 @@ export default function App() {
       detectFaceForClip,
       loadFaceModels,
       primaryFaceSlots,
-      renderFaceOverlaysForClips,
       speakerAssignedThumbnails,
       speakerFaceSlots,
       sourceVideoSize,
@@ -2521,11 +2548,49 @@ export default function App() {
         }
       });
       templateGroupIdsRef.current = [];
+
+      // Reset base clips' crop state and dimensions to prevent skewing
+      const pageId = pageRef.current;
+      const sourceSize = sourceVideoSize;
+      baseClipIdsRef.current.forEach((clipId) => {
+        if (!engine.block.isValid(clipId)) return;
+        try {
+          // Reset crop on the clip
+          engine.block.resetCrop(clipId);
+          // Reset crop on the fill if any
+          const fillId = engine.block.getFill(clipId);
+          if (fillId && engine.block.isValid(fillId)) {
+            engine.block.resetCrop(fillId);
+          }
+          // Reset content fill mode to default
+          if (engine.block.supportsContentFillMode(clipId)) {
+            engine.block.setContentFillMode(clipId, "Cover");
+          }
+          if (
+            fillId &&
+            engine.block.isValid(fillId) &&
+            engine.block.supportsContentFillMode(fillId)
+          ) {
+            engine.block.setContentFillMode(fillId, "Cover");
+          }
+          // Restore original dimensions and position
+          if (sourceSize && pageId && engine.block.isValid(pageId)) {
+            const sceneWidth = engine.block.getWidth(pageId);
+            const sceneHeight = engine.block.getHeight(pageId);
+            const positionX = (sceneWidth - sourceSize.width) / 2;
+            const positionY = (sceneHeight - sourceSize.height) / 2;
+            engine.block.setSize(clipId, sourceSize.width, sourceSize.height);
+            engine.block.setPosition(clipId, positionX, positionY);
+          }
+        } catch (error) {
+          console.warn("Failed to reset base clip state", error);
+        }
+      });
+
       if (options?.showBase ?? true) {
         setBaseClipVisibility(engine, true);
       }
       const shouldRestoreTrack = options?.restoreTrack ?? true;
-      const pageId = pageRef.current;
       const trackId = videoTrackRef.current;
       if (
         shouldRestoreTrack &&
@@ -2542,7 +2607,7 @@ export default function App() {
         }
       }
     },
-    [clearFaceOverlays]
+    [clearFaceOverlays, sourceVideoSize]
   );
 
   const resolveSpeakerFaces = (
@@ -2836,9 +2901,13 @@ export default function App() {
                 cropRect,
                 { resizeToCrop: true }
               );
+              // Use different corner radius for active speaker vs thumbnails in multi-speaker layout
+              const isActiveSpeaker = slotIndex === 0;
+              const radiusRatio = isActiveSpeaker
+                ? FACE_CROP_CORNER_RADIUS_RATIO_ACTIVE
+                : FACE_CROP_CORNER_RADIUS_RATIO_THUMB;
               const radius = clampValue(
-                Math.min(slot.width, slot.height) *
-                  FACE_CROP_CORNER_RADIUS_RATIO,
+                Math.min(slot.width, slot.height) * radiusRatio,
                 FACE_CROP_CORNER_RADIUS_MIN,
                 FACE_CROP_CORNER_RADIUS_MAX
               );
@@ -3293,7 +3362,31 @@ export default function App() {
   const loadVideoFile = async (file: File) => {
     if (!engineRef.current) return;
 
+    // File upload validation
+    const ALLOWED_VIDEO_TYPES = [
+      'video/mp4',
+      'video/quicktime',
+      'video/webm',
+      'video/x-msvideo', // .avi
+      'video/x-matroska', // .mkv
+      'video/mpeg',
+    ];
+
+    if (!ALLOWED_VIDEO_TYPES.includes(file.type)) {
+      alert(`Invalid file type: ${file.type}. Please upload a video file (MP4, MOV, WebM, AVI, MKV, MPEG).`);
+      return;
+    }
+
+    // Additional MIME type validation
+    const fileExtension = file.name.split('.').pop()?.toLowerCase();
+    const validExtensions = ['mp4', 'mov', 'webm', 'avi', 'mkv', 'mpeg', 'mpg'];
+    if (!fileExtension || !validExtensions.includes(fileExtension)) {
+      alert(`Invalid file extension. Please upload a video file.`);
+      return;
+    }
+
     setVideoFile(file);
+    setIsExtracting(true);
     resetWorkflowState();
     resetPreloadState();
     setTimelinePosition(0);
@@ -3363,15 +3456,39 @@ export default function App() {
     const blobUrl = URL.createObjectURL(file);
     const opfs = await navigator.storage.estimate();
     const directory = await navigator.storage.getDirectory();
-    const opfsFile = await directory.getFileHandle(file.name, { create: true });
+    // Sanitize filename to prevent path traversal and dangerous characters
+    const sanitizedFileName = file.name
+      .replace(/[<>:"|?*\x00-\x1F]/g, '') // Remove dangerous characters
+      .replace(/\.\./g, '') // Remove path traversal attempts
+      .replace(/^\.+/, '') // Remove leading dots
+      .replace(/\s+/g, '_') // Replace spaces with underscores
+      .substring(0, 255) // Limit filename length
+      || 'video.mp4'; // Fallback if name becomes empty
+
+    // Remove existing file if it exists to avoid lock conflicts
+    try {
+      await directory.removeEntry(sanitizedFileName);
+    } catch (e) {
+      // File doesn't exist, which is fine
+    }
+
+    const opfsFile = await directory.getFileHandle(sanitizedFileName, { create: true });
     const stream = await opfsFile.createWritable();
-    await stream.write(file);
+
+    // Write file as ArrayBuffer to ensure complete data transfer
+    const arrayBuffer = await file.arrayBuffer();
+    await stream.write(arrayBuffer);
     await stream.close();
 
-    const videoURL = "opfs://" + file.name;
+    // Small delay to ensure OPFS has fully persisted the file
+    await new Promise(resolve => setTimeout(resolve, 150));
+
+    const videoURL = "opfs://" + sanitizedFileName;
 
 
     const videoBlockId = await engine.block.addVideo(videoURL, 1920, 1080);
+
+    setIsExtracting(false);
 
     disableBlockHighlight(engine, videoBlockId);
     if (pageRef.current && engine.block.isValid(pageRef.current)) {
@@ -4016,6 +4133,39 @@ export default function App() {
     return speakers.size;
   };
 
+  const mergeSpeakerIdsInWords = (
+    words: TranscriptWord[],
+    targetSpeakerId: string
+  ): TranscriptWord[] => {
+    return words.map((word) => ({
+      ...word,
+      speaker_id: targetSpeakerId,
+    }));
+  };
+
+  const shouldMergeSpeakers = (
+    preloadResult: {
+      faceSlotsBySpeaker: Record<string, FaceBounds[]>;
+      thumbnails: SpeakerFaceThumbnail[];
+      primarySpeakerId: string | null;
+      maxFaces: number;
+    },
+    snippets: SpeakerSnippet[]
+  ): boolean => {
+    if (snippets.length <= 1) return false;
+    // Check if all speakers have at most 1 face and there's only 1 unique face slot
+    const allHaveAtMostOneFace = snippets.every((snippet) => {
+      const faces = preloadResult.faceSlotsBySpeaker[snippet.id] ?? [];
+      return faces.length <= 1;
+    });
+    if (!allHaveAtMostOneFace) return false;
+    // Check if all thumbnails point to the same slot (same face position)
+    const uniqueSlots = new Set(
+      preloadResult.thumbnails.map((thumb) => thumb.slotIndex)
+    );
+    return uniqueSlots.size <= 1;
+  };
+
   const mapTrimmedWordsToSourceOrFallback = (
     sourceWords: TranscriptWord[],
     trimmedWords: TranscriptWord[]
@@ -4388,7 +4538,7 @@ export default function App() {
 
       if (!needsIdentification && optionSlots.length === 1) {
         const slotIndex = optionSlots[0];
-        if (parsed.speakerSnippets.length > 1 && slotIndex !== undefined) {
+        if (parsed.speakerSnippets.length >= 1 && slotIndex !== undefined) {
           const singleAssignments: Record<string, number> = {};
           parsed.speakerSnippets.forEach((snippet) => {
             singleAssignments[snippet.id] = slotIndex;
@@ -4535,6 +4685,12 @@ export default function App() {
     if (!pending) return;
     try {
       stopSpeakerPlayback();
+      setIsCreatingVideo(true);
+      setActiveSpeakerId(null);
+      setSpeakerQueue([]);
+      setAvailableFaceSlots([]);
+      setHasPlayedSpeakerAudio(false);
+      setIsSpeakerAudioPlaying(false);
       speakerAssignmentsRef.current = assignments;
       setSpeakerAssignments(assignments);
       await applyRefinementToTimeline(
@@ -4545,11 +4701,6 @@ export default function App() {
       updateProcessingStatus("preload", "complete");
       pendingWorkflowRef.current = null;
       setIsSpeakerIdentificationActive(false);
-      setActiveSpeakerId(null);
-      setSpeakerQueue([]);
-      setAvailableFaceSlots([]);
-      setHasPlayedSpeakerAudio(false);
-      setIsSpeakerAudioPlaying(false);
     } catch (error) {
       console.error("Failed to finalize speaker identification", error);
       updateProcessingStatus("preload", "error");
@@ -4560,6 +4711,7 @@ export default function App() {
       );
     } finally {
       setAutoProcessing(false);
+      setIsCreatingVideo(false);
     }
   };
 
@@ -4701,7 +4853,7 @@ export default function App() {
 
       activeStep = "transcript";
       updateProcessingStatus("transcript", "active");
-      const words = await transcribeExtractedAudio(audioBlob);
+      let words = await transcribeExtractedAudio(audioBlob);
       if (!words.length) {
         throw new Error("Transcript did not contain any timestamped words.");
       }
@@ -4712,9 +4864,11 @@ export default function App() {
       const desiredVariants =
         refinementMode === "sixty_seconds" ||
         refinementMode === "thirty_seconds"
-          ? 3
-          : 1;
-      const { refinement, rawText } = await requestGeminiRefinement(
+          ? 4
+          : refinementMode === "summary"
+            ? 4
+            : 1;
+      let { refinement, rawText } = await requestGeminiRefinement(
         words,
         refinementMode,
         { variantCount: desiredVariants }
@@ -4763,7 +4917,7 @@ export default function App() {
         timelineDuration ||
         speakerSnippetWords[speakerSnippetWords.length - 1]?.end ||
         0;
-      const snippets = buildSpeakerSnippets(
+      let snippets = buildSpeakerSnippets(
         speakerSnippetWords,
         totalDuration
       );
@@ -4785,6 +4939,53 @@ export default function App() {
       }
 
       if (preloadResult) {
+        // Detect if multiple "speakers" are actually the same person
+        if (shouldMergeSpeakers(preloadResult, snippets)) {
+          const targetSpeakerId = preloadResult.primarySpeakerId ?? snippets[0]?.id ?? "speaker_0";
+          console.info("[Speaker Debug] Merging speakers into single speaker", {
+            originalSpeakers: snippets.map((s) => s.id),
+            targetSpeakerId,
+          });
+          // Merge speaker IDs in words
+          words = mergeSpeakerIdsInWords(words, targetSpeakerId);
+          setCurrentTranscriptWords(words);
+          // Merge speaker IDs in refinement
+          refinement = {
+            ...refinement,
+            trimmed_words: mergeSpeakerIdsInWords(refinement.trimmed_words, targetSpeakerId),
+            concepts: refinement.concepts.map((concept) => ({
+              ...concept,
+              trimmed_words: mergeSpeakerIdsInWords(concept.trimmed_words, targetSpeakerId),
+            })),
+          };
+          lastRefinementRef.current = refinement;
+          // Rebuild snippets with merged words
+          const totalDuration =
+            sourceVideoDuration ||
+            timelineDuration ||
+            words[words.length - 1]?.end ||
+            0;
+          snippets = buildSpeakerSnippets(words, totalDuration);
+          setSpeakerSnippets(snippets);
+          // Merge preload result to single speaker
+          const mergedFaceSlots: Record<string, FaceBounds[]> = {
+            [targetSpeakerId]: preloadResult.faceSlotsBySpeaker[targetSpeakerId] ??
+              Object.values(preloadResult.faceSlotsBySpeaker)[0] ?? [],
+          };
+          const primaryThumbnail = preloadResult.thumbnails.find(
+            (t) => t.speakerId === targetSpeakerId
+          ) ?? preloadResult.thumbnails[0];
+          const mergedThumbnails = primaryThumbnail
+            ? [{ ...primaryThumbnail, speakerId: targetSpeakerId }]
+            : [];
+          preloadResult = {
+            ...preloadResult,
+            faceSlotsBySpeaker: mergedFaceSlots,
+            thumbnails: mergedThumbnails,
+            primarySpeakerId: targetSpeakerId,
+          };
+        }
+
         await cachePreloadSnapshot({
           words,
           refinement,
@@ -4833,7 +5034,7 @@ export default function App() {
           setHidePreloadThumbnails(false);
         }
 
-        if (!needsIdentification && optionSlots.length === 1 && snippets.length > 1) {
+        if (!needsIdentification && optionSlots.length === 1 && snippets.length >= 1) {
           const singleAssignments: Record<string, number> = {};
           const slotIndex = optionSlots[0];
           snippets.forEach((snippet) => {
@@ -6073,11 +6274,19 @@ export default function App() {
   };
 
   const hasVideo = Boolean(videoFile);
+  const areLoadingStepsComplete =
+    autoProcessStatuses.audio === "complete" &&
+    autoProcessStatuses.transcript === "complete" &&
+    autoProcessStatuses.analysis === "complete";
+  const isFaceDetectionActive =
+    areLoadingStepsComplete &&
+    (autoProcessStatuses.preload === "active" || isSpeakerIdentificationActive);
   const isWorkflowProcessing =
     autoProcessing || isExtracting || isTranscribing || isSpeakerIdentificationActive;
   const showTrimStage = hasVideo && (!hasStartedWorkflow || autoProcessingError);
   const showProcessingStage =
     hasVideo && hasStartedWorkflow && isWorkflowProcessing;
+  const showFaceDetectionInCard = isFaceDetectionActive;
   const showResultStage =
     hasVideo &&
     hasStartedWorkflow &&
@@ -6107,8 +6316,32 @@ export default function App() {
   const uniqueAssignedSlots = new Set(assignedFaceSlots);
   const canShowTemplate =
     showResultStage &&
-    speakerSnippets.length > 1 &&
-    uniqueAssignedSlots.size > 1;
+    uniqueAssignedSlots.size >= 1;
+  const availableTemplateOptions = SPEAKER_TEMPLATE_OPTIONS.filter((option) => {
+    // "none" is always available when we can show templates
+    if (option.id === "none") return true;
+    // "solo" is available with 1+ speakers
+    if (option.id === "solo") return uniqueAssignedSlots.size >= 1;
+    // "multi" requires 2+ speakers
+    if (option.id === "multi") return uniqueAssignedSlots.size >= 2;
+    // Other templates (sidecar, overlay, etc.) require 2+ speakers
+    return uniqueAssignedSlots.size >= 2;
+  });
+  const resultsTitle = (() => {
+    const mode = lastRefinementModeRef.current;
+    switch (mode) {
+      case "thirty_seconds":
+        return "30-second highlights";
+      case "sixty_seconds":
+        return "1-minute highlights";
+      case "summary":
+        return "Summaries";
+      case "disfluency":
+        return "Clean delivery";
+      default:
+        return "Results";
+    }
+  })();
   const speakerQuestion =
     isSpeakerIdentificationActive && activeSpeakerSnippet
       ? {
@@ -6366,6 +6599,7 @@ export default function App() {
     onOpenEditor: openEditor,
     onExport: handleExport,
     isExporting,
+    isExtracting,
     aspectRatio: previewAspectRatio,
     isPlaying,
     timelineDuration,
@@ -6400,10 +6634,15 @@ export default function App() {
   const geminiFaceThumbnailUrl = geminiFaceThumbnail ?? null;
   const debugExportMetricsText = debugExportMetrics ?? null;
   const heroCopy = showProcessingStage
-    ? {
-        title: "Hang on, we're processing your video.",
-        subtitle: "Please don't close your browser.",
-      }
+    ? showFaceDetectionInCard
+      ? {
+          title: "Identifying speakers in your video.",
+          subtitle: "Help us match faces to speakers.",
+        }
+      : {
+          title: "Hang on, we're processing your video.",
+          subtitle: "Please don't close your browser.",
+        }
     : showResultStage
       ? {
           title: "Your clips are ready.",
@@ -6492,26 +6731,6 @@ export default function App() {
                             </button>
                             <Button
                               type="button"
-                              variant="outline"
-                              size="sm"
-                              onClick={handleGeminiFaceDebug}
-                              disabled={isFaceDebugLoading}
-                            >
-                              {isFaceDebugLoading
-                                ? "Detecting faces..."
-                                : "Debug speaker boxes"}
-                            </Button>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="sm"
-                              onClick={handleTinyDebugExport}
-                              disabled={isFaceDebugLoading}
-                            >
-                              Tiny export test
-                            </Button>
-                            <Button
-                              type="button"
                               variant="secondary"
                               size="sm"
                               onClick={() =>
@@ -6592,10 +6811,12 @@ export default function App() {
                       autoProcessingError={autoProcessingError}
                       analysisStage={analysisStage}
                       analysisEstimate={analysisEstimate}
+                      showFaceDetection={showFaceDetectionInCard}
                       preloadSnippets={speakerSnippets}
                       preloadThumbnails={speakerThumbnails}
                       speakerQuestion={speakerQuestion}
                       hidePreloadDetails={hidePreloadThumbnails}
+                      isCreatingVideo={isCreatingVideo}
                     />
                     <Button
                       type="button"
@@ -6633,11 +6854,14 @@ export default function App() {
                           onSelect={handleConceptSelection}
                           onShortenAnother={handleRemoveVideo}
                           speakerPreviews={conceptSpeakerPreviews}
+                          sourceWords={currentTranscriptWords}
+                          totalDuration={sourceVideoDuration || timelineDuration || 0}
+                          title={resultsTitle}
                         />
                       ) : (
                         <div className="rounded-xl border bg-card p-4">
                           <p className="text-sm font-medium text-foreground">
-                            Results
+                            {resultsTitle}
                           </p>
                           <p className="mt-2 text-sm text-muted-foreground">
                             Trim applied. No alternate highlight options were
@@ -6657,7 +6881,7 @@ export default function App() {
                       {canShowTemplate && (
                         <div className="rounded-xl border bg-card p-4">
                           <p className="text-sm font-medium text-foreground">
-                            Template
+                            Layout
                           </p>
                           <p className="mt-1 text-xs text-muted-foreground">
                             Choose whether to crop tightly around the active
@@ -6665,7 +6889,7 @@ export default function App() {
                           </p>
                           <div className="mt-3">
                             <TemplatePicker
-                              options={SPEAKER_TEMPLATE_OPTIONS}
+                              options={availableTemplateOptions}
                               value={speakerTemplateId}
                               onChange={setSpeakerTemplateId}
                             />

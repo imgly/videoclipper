@@ -44,14 +44,14 @@ const AspectRatioPicker = ({
           className={cn(
             "flex w-24 flex-col items-center gap-2 rounded-xl border px-3 py-3 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
             isActive
-              ? "border-primary bg-primary/5 text-foreground"
+              ? "border-primary text-foreground"
               : "border-muted text-muted-foreground hover:border-muted-foreground/60",
             disabled && "pointer-events-none opacity-50"
           )}
           aria-pressed={isActive}
           disabled={disabled}
         >
-          <div className="flex h-12 w-12 items-center justify-center rounded-lg bg-muted/30">
+          <div className="flex h-12 w-12 items-center justify-center">
             <div
               className={cn(
                 "rounded-sm border-2 transition-colors",

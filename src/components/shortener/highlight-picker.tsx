@@ -30,6 +30,7 @@ type HighlightPickerProps = {
   sourceWords?: TranscriptWord[];
   totalDuration?: number;
   title?: string;
+  showSpeakerThumbnails?: boolean;
 };
 
 const HighlightPicker = ({
@@ -44,6 +45,7 @@ const HighlightPicker = ({
   sourceWords = [],
   totalDuration = 0,
   title = "Results",
+  showSpeakerThumbnails = true,
 }: HighlightPickerProps) => (
   <div className="rounded-xl border bg-card p-4">
     <div className="flex items-center justify-between">
@@ -102,7 +104,7 @@ const HighlightPicker = ({
             <div className="mt-3 flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
               {durationLabel && <span>{durationLabel}</span>}
             </div>
-            {speakers.length ? (
+            {showSpeakerThumbnails && speakers.length ? (
               <div className="mt-3 border-t pt-3">
                 <div className="mt-2 flex flex-wrap gap-4">
                   {speakers.map((speaker) => {

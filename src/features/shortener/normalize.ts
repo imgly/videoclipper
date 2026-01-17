@@ -17,6 +17,61 @@ const normalizeTextValue = (value: unknown): string | null => {
   return trimmed ? trimmed : null;
 };
 
+const normalizeWordToken = (value: string | undefined | null): string =>
+  String(value ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9']+/g, "");
+
+const tokenizeTrimmedText = (text: string): string[] =>
+  String(text ?? "")
+    .split(/\s+/)
+    .map(normalizeWordToken)
+    .filter(Boolean);
+
+/**
+ * Convert trimmed_text string to trimmed_words array by matching against source words.
+ * This performs sequential text matching to find corresponding words with timestamps.
+ */
+const buildTrimmedWordsFromText = (
+  sourceWords: TranscriptWord[],
+  trimmedText: string
+): TranscriptWord[] => {
+  if (!Array.isArray(sourceWords) || !sourceWords.length || !trimmedText) {
+    return [];
+  }
+  const tokens = tokenizeTrimmedText(trimmedText);
+  if (!tokens.length) return [];
+
+  const normalizedSource = sourceWords.map((word, index) => ({
+    index,
+    normalized: normalizeWordToken(word?.text),
+  }));
+
+  let sourceIndex = 0;
+  const trimmedWords: TranscriptWord[] = [];
+
+  tokens.forEach((token) => {
+    if (!token) return;
+    for (let i = sourceIndex; i < normalizedSource.length; i += 1) {
+      if (normalizedSource[i].normalized === token) {
+        const sourceWord = sourceWords[i];
+        if (sourceWord && typeof sourceWord.text === "string") {
+          trimmedWords.push({
+            text: sourceWord.text,
+            start: sourceWord.start,
+            end: sourceWord.end,
+            speaker_id: sourceWord.speaker_id ?? null,
+          });
+        }
+        sourceIndex = i + 1;
+        return;
+      }
+    }
+  });
+
+  return trimmedWords;
+};
+
 const normalizeTranscriptWordList = (
   words: TranscriptWord[] | undefined | null
 ): TranscriptWord[] => {
@@ -69,13 +124,30 @@ const ensureConceptId = (
 const normalizeGeminiConceptChoice = (
   concept: GeminiConceptRaw | null | undefined,
   index: number,
-  seenIds: Set<string>
+  seenIds: Set<string>,
+  sourceWords: TranscriptWord[]
 ): GeminiConceptChoice | null => {
   if (!concept) return null;
-  const trimmedWords = normalizeTranscriptWordList(concept.trimmed_words);
+
+  // Prefer building trimmed_words from trimmed_text (lean response from Gemini)
+  const trimmedText = normalizeTextValue(
+    (concept as { trimmed_text?: string }).trimmed_text
+  );
+  let trimmedWords: TranscriptWord[] = [];
+
+  if (trimmedText && sourceWords.length) {
+    trimmedWords = buildTrimmedWordsFromText(sourceWords, trimmedText);
+  }
+
+  // Fall back to existing trimmed_words if provided (legacy/fallback)
+  if (!trimmedWords.length) {
+    trimmedWords = normalizeTranscriptWordList(concept.trimmed_words);
+  }
+
   if (!trimmedWords.length) {
     return null;
   }
+
   const title =
     normalizeTextValue(
       concept.title ??
@@ -109,14 +181,29 @@ const normalizeGeminiConceptChoice = (
 };
 
 export const normalizeGeminiRefinement = (
-  value: GeminiRefinementPayload
+  value: GeminiRefinementPayload,
+  sourceWords: TranscriptWord[] = []
 ): GeminiRefinement => {
-  const trimmedWords = normalizeTranscriptWordList(value?.trimmed_words);
+  // Prefer building trimmed_words from trimmed_text (lean response from Gemini)
+  const trimmedText = normalizeTextValue(
+    (value as { trimmed_text?: string })?.trimmed_text
+  );
+  let trimmedWords: TranscriptWord[] = [];
+
+  if (trimmedText && sourceWords.length) {
+    trimmedWords = buildTrimmedWordsFromText(sourceWords, trimmedText);
+  }
+
+  // Fall back to existing trimmed_words if provided (legacy/fallback)
+  if (!trimmedWords.length) {
+    trimmedWords = normalizeTranscriptWordList(value?.trimmed_words);
+  }
+
   const seenConceptIds = new Set<string>();
   const concepts = Array.isArray(value?.concepts)
     ? value.concepts
         .map((concept, index) =>
-          normalizeGeminiConceptChoice(concept, index, seenConceptIds)
+          normalizeGeminiConceptChoice(concept, index, seenConceptIds, sourceWords)
         )
         .filter((concept): concept is GeminiConceptChoice => Boolean(concept))
     : [];

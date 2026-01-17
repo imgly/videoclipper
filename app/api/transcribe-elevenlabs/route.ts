@@ -20,7 +20,7 @@ export async function POST(req: Request) {
     const audioFile = formData.get("audio") as File;
     const modelId = (formData.get("modelId") as string) ||
                     process.env.ELEVENLABS_TRANSCRIPTION_MODEL ||
-                    "scribe_v1";
+                    "scribe_v2";
     const diarizeParam = formData.get("diarize");
 
     // Default to true if not specified

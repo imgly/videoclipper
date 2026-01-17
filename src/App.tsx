@@ -2828,6 +2828,16 @@ export default function App() {
             }
             engine.block.setDuration(clip, duration);
 
+            // Mute audio on all clips except the first slot (active speaker)
+            // to prevent multiple audio streams playing simultaneously
+            if (slotIndex > 0) {
+              try {
+                engine.block.setMuted(clip, true);
+              } catch (muteError) {
+                console.warn("Failed to mute template clip audio", muteError);
+              }
+            }
+
             try {
               engine.block.setClipped(clip, true);
             } catch (error) {
@@ -3028,6 +3038,16 @@ export default function App() {
             engine.block.setTrimLength(clipFill, duration);
           }
           engine.block.setDuration(clip, duration);
+
+          // Mute audio on all clips except the first slot (active speaker)
+          // to prevent multiple audio streams playing simultaneously
+          if (slotIndex > 0) {
+            try {
+              engine.block.setMuted(clip, true);
+            } catch (muteError) {
+              console.warn("Failed to mute template clip audio", muteError);
+            }
+          }
 
           engine.block.setSize(clip, slot.width, slot.height);
           engine.block.setPosition(clip, slot.x, slot.y);
@@ -6857,6 +6877,7 @@ export default function App() {
                           sourceWords={currentTranscriptWords}
                           totalDuration={sourceVideoDuration || timelineDuration || 0}
                           title={resultsTitle}
+                          showSpeakerThumbnails={speakerSnippets.length > 1}
                         />
                       ) : (
                         <div className="rounded-xl border bg-card p-4">

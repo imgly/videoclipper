@@ -76,7 +76,8 @@ export const requestGeminiRefinement = async (
   }
 
   return {
-    refinement: normalizeGeminiRefinement(parsed),
+    // Pass source words so normalize can convert trimmed_text to trimmed_words
+    refinement: normalizeGeminiRefinement(parsed, words),
     fileUploadUsed,
     rawText: aggregatedText,
   };

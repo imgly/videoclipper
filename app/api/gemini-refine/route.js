@@ -268,12 +268,9 @@ export async function POST(req) {
       ? { "x-gemini-file-upload": "true" }
       : undefined;
 
-    const expandedResponse = expandGeminiResponse(data, sourceWords);
-    const responsePayload = expandedResponse
-      ? buildGeminiCandidateFromText(expandedResponse)
-      : data;
-
-    return NextResponse.json(responsePayload, {
+    // Return the raw Gemini response without expanding trimmed_text to trimmed_words.
+    // The client will handle the conversion using its local source words.
+    return NextResponse.json(data, {
       status: 200,
       headers,
     });

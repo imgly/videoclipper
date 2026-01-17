@@ -6,7 +6,7 @@ export const transcribeWithElevenLabs = async (
   audioBlob: Blob
 ): Promise<TranscriptionResult> => {
   const modelId =
-    process.env.NEXT_PUBLIC_ELEVENLABS_TRANSCRIPTION_MODEL || "scribe_v1";
+    process.env.NEXT_PUBLIC_ELEVENLABS_TRANSCRIPTION_MODEL || "scribe_v2";
   const diarizeEnv = process.env.NEXT_PUBLIC_ELEVENLABS_DIARIZE;
   const shouldDiarize =
     diarizeEnv === undefined

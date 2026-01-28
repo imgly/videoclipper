@@ -1,41 +1,29 @@
-# Build in a Day: AI Video-Clipping — From Long-Form to Viral Clips with CE.SDK
+# Build in a Day: AI Video Clipping with CE.SDK
 
 ---
 
-## 1. Introduction
+## Introduction
 
-### The Challenge
-Turning long-form video into engaging short clips is time-consuming and requires skilled editing. What if we could automate the entire process—from identifying the best moments to creating polished, multi-format outputs?
+We built a video shortener in a single day using Claude Code and CE.SDK. It extracts 3-4 short clips from long-form video, handles transcription, identifies the best moments via AI, detects speakers, and outputs vertical/horizontal/square formats—all running in the browser.
 
-### What We're Building
-An AI-powered video shortener that:
+**Features:**
+- Extracts 3-4 clips per video (highlights, summaries, or cleaned-up edits)
+- Outputs 9:16 (vertical), 16:9 (landscape), or 1:1 (square)
+- Detects speakers and maps them to faces with user confirmation
+- Auto-crops to follow the active speaker
+- Adds captions and text hooks
+- Non-destructive: change aspect ratio or template without re-processing
 
-- **Automatically creates 3-4 shorts** from a long video
-- **Multiple output modes**: highlights, summaries, or cleaned-up edits
-- **Flexible aspect ratios**: 9:16 (vertical), 16:9 (landscape), 1:1 (square)
-- **Semi-automatic speaker detection** with user confirmation (quiz-style interaction)
-- **Face detection** for automatic zoom and crop on speakers
-- **Auto-captions & text hooks** for social media engagement
-- **Fully editable results** — style, layout, and format changes without re-processing
+> **Best suited for**: Videos with speech/dialogue (podcasts, interviews, presentations, vlogs)
 
-> **Best suited for**: Videos with significant speech/dialogue (podcasts, interviews, presentations, vlogs)
+### Why Client-Side?
 
-### Why Client-Side Video Editing?
+CE.SDK's CreativeEngine runs in the browser via WebAssembly. Video decoding, timeline manipulation, effects, and preview all happen on the user's device.
 
-CE.SDK's CreativeEngine runs entirely in the browser via WebAssembly. This means all the heavy lifting — video decoding, timeline manipulation, effects rendering, and preview generation — happens directly on the user's device rather than on remote servers.
-
-**Why this matters:**
-
-- **2-3x faster turnaround** — No upload/download overhead, no queue waiting. Edits preview instantly.
-- **Non-destructive editing** — Changed your mind about the aspect ratio? Want a different template? Just switch it. No need to re-process the entire video like with cloud services.
-- **Lower infrastructure costs** — Processing happens on the user's device, not your servers. Your costs don't scale with video length or user count.
-- **Better user experience** — Real-time preview means users see exactly what they'll get, instantly.
-
-### Built in a Day
-This entire application was built in a single day using:
-- **Claude Code** for AI-assisted development
-- **CE.SDK** as the video editing engine
-- The combination of a powerful SDK + AI coding tools enables rapid prototyping of complex video applications
+**Benefits:**
+- **No upload/download wait** — edits preview instantly
+- **Non-destructive** — switch aspect ratio or template without re-rendering
+- **Lower infrastructure costs** — your costs don't scale with video length or user count
 
 ### Tech Stack
 - **Frontend**: Next.js + React
@@ -45,15 +33,15 @@ This entire application was built in a single day using:
 
 ---
 
-## 2. Architecture Overview
+## Architecture Overview
 
 ### High-Level Flow
 
 ```
-Illustration // FIGMA 
+Illustration // FIGMA
 ```
 
-### Ingredients: API Keys Required
+### Required API Keys
 
 | Service | Purpose | Environment Variable |
 |---------|---------|---------------------|
@@ -63,11 +51,11 @@ Illustration // FIGMA
 
 ---
 
-## 3. Setting Up CE.SDK
+## Setting Up CE.SDK
 
 ### What is CE.SDK?
 
-CE.SDK (CreativeEngine SDK) is a powerful, browser-based creative engine that enables real-time video, image, and design editing. Think of it as a programmable video editor that runs entirely in the browser.
+CE.SDK (CreativeEngine SDK) is a browser-based engine for video, image, and design editing—a programmable video editor you can embed in your app.
 
 **Key Concepts:**
 - **Engine**: The core runtime that manages the editing session
@@ -154,7 +142,7 @@ console.log(`Video: ${sourceWidth}x${sourceHeight}, ${duration}s`);
 
 ---
 
-## 4. AI-Powered Transcription & Highlight Detection
+## AI-Powered Transcription & Highlight Detection
 
 ### The Pipeline
 
@@ -167,23 +155,21 @@ console.log(`Video: ${sourceWidth}x${sourceHeight}, ${duration}s`);
 ElevenLabs Scribe v2 provides:
 - Word-level timestamps (start/end time for each word)
 - Speaker diarization (which speaker said what)
-- High accuracy even with multiple speakers
 
-The output gives us a structured transcript where each word has a precise timestamp, enabling frame-accurate editing.
+The output is a structured transcript where each word has a precise timestamp, enabling frame-accurate editing.
 
 ### AI Highlight Detection with Gemini
 
-The key to good results is a well-crafted prompt. Here's the essential structure:
+The prompt structure matters. Here's what works:
 
 ```
-You are analyzing a video transcript to identify the most compelling segments
-for short-form content.
+You are analyzing a video transcript to identify segments for short-form content.
 
 TRANSCRIPT:
 [Word-by-word transcript with timestamps]
 
 TASK:
-Identify 3-4 segments that would make engaging short videos. For each segment:
+Identify 3-4 segments that work as standalone short videos. For each segment:
 1. Find the exact starting and ending words
 2. Ensure clean sentence boundaries (no mid-sentence cuts)
 3. Aim for 30-60 second segments
@@ -193,8 +179,8 @@ OUTPUT FORMAT (JSON):
   "concepts": [
     {
       "id": "concept_1",
-      "title": "Compelling hook title",
-      "description": "What makes this segment engaging",
+      "title": "Hook title",
+      "description": "Why this segment works as a standalone clip",
       "trimmed_text": "The exact transcript text to keep...",
       "estimated_duration_seconds": 45
     }
@@ -223,9 +209,7 @@ This text-matching approach is more reliable than asking the AI to output timest
 
 ---
 
-## 5. Working with the CE.SDK Timeline
-
-This section is your cookbook for common timeline operations.
+## Working with the CE.SDK Timeline
 
 ### Understanding Blocks
 
@@ -331,28 +315,28 @@ async function generateSpeakerThumbnail(
 
 ---
 
-## 6. Speaker Detection & Face Tracking
+## Speaker Detection & Face Tracking
 
 ### Why Semi-Automatic?
 
-We chose a **human-in-the-loop** approach: a quick 5-second confirmation beats re-processing a 10-minute video when auto-detection fails. The quiz-style "Who is this speaker?" interaction also turns a technical step into an engaging moment.
+Fully automatic speaker detection fails often enough that we added a confirmation step. Users verify detected faces against speaker names from the transcript—takes a few seconds and prevents bad crops on the entire video.
 
 ### How It Works
 
 1. **Sample frames** throughout the video
-2. **Detect & cluster faces** using face-api.js (browser-based, no server needed)
+2. **Detect & cluster faces** using face-api.js (runs in browser, no server needed)
 3. **User confirms** speaker identities via thumbnails
 4. **Correlate with transcript** diarization to map speakers → face locations
 
-The result: verified speaker-to-face mapping enabling dynamic cropping and picture-in-picture layouts.
+This gives us verified speaker-to-face mapping for dynamic cropping and picture-in-picture layouts.
 
 ---
 
-## 7. Multi-Speaker Templates & Dynamic Switching
+## Multi-Speaker Templates & Dynamic Switching
 
 ### The Concept
 
-When a video has multiple speakers, we can create engaging layouts that show:
+When a video has multiple speakers, we can create layouts that show:
 - The **active speaker** prominently
 - **Other speakers** in smaller picture-in-picture views
 - **Dynamic switching** as the conversation flows
@@ -390,63 +374,45 @@ if (slotIndex > 0) {
 As the active speaker changes throughout the video, we:
 1. Detect which speaker is talking (from transcript diarization)
 2. Swap speaker positions in the template
-3. Ensure the active speaker is always in the prominent position
+3. Keep the active speaker in the prominent position
 
-This creates a "smart" layout that follows the conversation naturally.
+The layout updates automatically as the conversation switches between speakers.
 
 ---
 
-## 8. Preview & Playback
+## Preview, Playback & Export
 
-### Setting Up the CE.SDK Canvas
+### Setting Up the Canvas
 
 ```typescript
-// Create a container element
 const container = document.getElementById('cesdk-canvas');
-
-// Attach the engine's canvas
 engine.element.attachTo(container);
-
-// The engine will render the current scene to this canvas
 ```
 
-### Controlling Playback
+### Playback Controls
 
 ```typescript
-// Play/Pause
 engine.player.play();
 engine.player.pause();
+engine.player.setPlaybackTime(30.5); // seek to 30.5 seconds
 
-// Seek to specific time
-engine.player.setPlaybackTime(30.5); // 30.5 seconds
-
-// Get current playback time
 const currentTime = engine.player.getPlaybackTime();
-
-// Check playback state
 const isPlaying = engine.player.isPlaying();
 ```
 
 ### Syncing UI State
 
 ```typescript
-// Listen for playback time changes
 engine.player.onPlaybackTimeChanged(() => {
   const time = engine.player.getPlaybackTime();
   updateTimeDisplay(time);
   updateProgressBar(time / totalDuration);
 });
 
-// Listen for play/pause state changes
 engine.player.onPlaybackStateChanged(() => {
-  const playing = engine.player.isPlaying();
-  updatePlayButton(playing);
+  updatePlayButton(engine.player.isPlaying());
 });
 ```
-
----
-
-## 9. Exporting the Final Video
 
 ### Export Options
 
@@ -458,24 +424,14 @@ const exportOptions = {
   videoBitrate: 8_000_000,  // 8 Mbps
 };
 
-const mimeType = 'video/mp4';
-```
-
-### Exporting with Progress
-
-```typescript
 const blob = await engine.block.export(
   page,
-  mimeType,
+  'video/mp4',
   exportOptions,
-  (progress) => {
-    // progress is 0.0 to 1.0
-    updateProgressBar(progress * 100);
-    console.log(`Export: ${Math.round(progress * 100)}%`);
-  }
+  (progress) => updateProgressBar(progress * 100)
 );
 
-// Create download link
+// Trigger download
 const url = URL.createObjectURL(blob);
 const a = document.createElement('a');
 a.href = url;
@@ -483,40 +439,33 @@ a.download = 'shortened-video.mp4';
 a.click();
 ```
 
-### Handling Large Exports
-
-For longer videos, consider:
-- Showing estimated time remaining
-- Allowing background export
-- Chunked export for very large files
+For longer videos, consider showing estimated time remaining or allowing background export.
 
 ---
 
-## 10. Demo: The Finished App
+## The Finished App
 
 [Screenshots/GIF of the app in action]
 
-1. **Upload** a long-form video
-2. **Select mode**: Highlights, Summary, or Cleanup
-3. **Choose aspect ratio**: 9:16, 16:9, or 1:1
-4. **Confirm speakers**: Quick quiz-style verification of detected faces
-5. **Review AI suggestions**: 3-4 auto-detected highlights
-6. **Pick a template**: Solo, Sidecar, Stacked, etc.
-7. **Preview & adjust**: Real-time editing in browser
-8. **Export**: Download the final short-form video
+The user flow:
+
+**Upload** → Drop a long-form video into the browser
+
+**Configure** → Pick output mode (highlights/summary/cleanup) and aspect ratio (9:16, 16:9, 1:1)
+
+**Verify speakers** → Match detected faces to transcript speaker names
+
+**Review clips** → Browse the 3-4 AI-suggested segments, adjust if needed
+
+**Choose template** → Solo speaker, sidecar, stacked, etc.
+
+**Preview** → Scrub through the timeline, see exactly what you'll get
+
+**Export** → Download the final video directly from the browser
 
 ---
 
-## 11. Conclusion & Next Steps
-
-### What We Covered
-
-- Loading and manipulating video with CE.SDK
-- Extracting audio and transcribing with word-level timestamps
-- AI-powered highlight detection with Gemini
-- Semi-automatic speaker detection (human-in-the-loop for accuracy)
-- Multi-speaker templates with dynamic switching
-- Real-time preview and export
+## What's Next
 
 ### Ideas for Extension
 
@@ -528,9 +477,9 @@ For longer videos, consider:
 
 ### Taking It Server-Side
 
-While client-side processing offers speed and cost advantages, it has limitations — large files can strain browser memory, and users must keep the tab open during export. For a more robust solution, consider a hybrid approach: upload videos in the background while users continue editing, then offload final rendering to a server.
+Client-side processing has limits: large files strain browser memory, and users must keep the tab open during export. A hybrid approach works better for production—upload in the background while users edit, then render on a server.
 
-CE.SDK's multi-platform architecture makes this straightforward — the same code runs server-side too. If you need batch processing, background jobs, or want to offload rendering from user devices, check out the [CE.SDK Renderer for creative automation](https://img.ly/blog/ce-sdk-renderer-creative-automation/). It enables high-throughput video generation on your own infrastructure — same API, different runtime.
+CE.SDK runs server-side with the same API. For batch processing, background jobs, or offloading rendering from user devices, see the [CE.SDK Renderer for creative automation](https://img.ly/blog/ce-sdk-renderer-creative-automation/).
 
 ### Resources
 
@@ -542,4 +491,4 @@ CE.SDK's multi-platform architecture makes this straightforward — the same cod
 
 ---
 
-*Made by [IMG.LY](https://img.ly) with [CE.SDK](https://img.ly/creative-sdk) — the creative engine for browser-based design and video editing.*
+*Made by [IMG.LY](https://img.ly) with [CE.SDK](https://img.ly/creative-sdk)*

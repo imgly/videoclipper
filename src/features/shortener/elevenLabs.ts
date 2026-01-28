@@ -15,7 +15,7 @@ export const transcribeWithElevenLabs = async (
 
   // Build request to our secure API route
   const formData = new FormData();
-  formData.append("audio", audioBlob, "extracted-audio.mp4");
+  formData.append("audio", audioBlob, "extracted-audio.mp3");
   formData.append("modelId", modelId);
   formData.append("diarize", String(shouldDiarize));
 

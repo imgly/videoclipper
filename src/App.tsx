@@ -7,9 +7,13 @@ import {
   Conversion,
   BlobSource,
   BufferTarget,
-  WavOutputFormat,
+  Mp3OutputFormat,
   ALL_FORMATS,
 } from "mediabunny";
+import { registerMp3Encoder } from "@mediabunny/mp3-encoder";
+
+// Register MP3 encoder for audio extraction
+registerMp3Encoder();
 import {
   buildTranscriptWordsFromText,
   extractOpenAITranscriptWords,
@@ -61,6 +65,25 @@ import {
   DEFAULT_ASPECT_RATIO_ID,
   resolveAspectRatio,
 } from "@/features/shortener/aspect-ratios";
+import { calculateSceneDimensions } from "@/features/shortener/scene-dimensions";
+import {
+  buildHookTextFromWords,
+  coerceHookText,
+  HOOK_DEFAULT_TEXT,
+} from "@/features/shortener/hook-text";
+import {
+  clampValue,
+  imageDataToCanvas,
+  normalizeCropRect,
+  buildFacePixelCropRect,
+  scaleCropRect,
+  parseFaceDetections,
+} from "@/features/shortener/face-crop-utils";
+import type {
+  FaceCropRect,
+  NormalizedCropRect,
+  FaceDetectionResult,
+} from "@/features/shortener/face-crop-utils";
 
 const CAPTION_MAX_WORDS = 8;
 const CAPTION_MAX_DURATION = 3.2;
@@ -101,72 +124,8 @@ const FACE_OVERLAY_COLORS = [
 const SPEAKER_SNIPPET_MIN_SECONDS = 3;
 const SPEAKER_SEGMENT_GAP_SECONDS = 0.8;
 const HOOK_DURATION_SECONDS = 5;
-const HOOK_MAX_WORDS = 18;
-const HOOK_MIN_WORDS = 6;
-const HOOK_MAX_CHARACTERS = 96;
-const HOOK_DEFAULT_TEXT = "Here's the key moment - watch what happens.";
 const DEFAULT_ANALYSIS_SECONDS = 30;
 const MIN_CLIP_DURATION_SECONDS = 1;
-
-const calculateSceneDimensions = (
-  sourceWidth: number,
-  sourceHeight: number,
-  targetRatio: number
-) => {
-  if (!Number.isFinite(sourceWidth) || !Number.isFinite(sourceHeight)) {
-    return { width: 1920, height: 1080 };
-  }
-  if (sourceWidth <= 0 || sourceHeight <= 0) {
-    return { width: 1920, height: 1080 };
-  }
-  const sourceRatio = sourceWidth / sourceHeight;
-  if (sourceRatio >= targetRatio) {
-    return {
-      width: sourceHeight * targetRatio,
-      height: sourceHeight,
-    };
-  }
-  return {
-    width: sourceWidth,
-    height: sourceWidth / targetRatio,
-  };
-};
-
-const normalizeHookText = (text: string) =>
-  text.replace(/\s+([,.!?])/g, "$1").replace(/\s+/g, " ").trim();
-
-const buildHookTextFromWords = (words: TranscriptWord[]) => {
-  if (!words.length) return HOOK_DEFAULT_TEXT;
-  const selected: string[] = [];
-  let wordCount = 0;
-  for (const word of words) {
-    const token = word.text?.trim() ?? "";
-    if (!token) continue;
-    selected.push(token);
-    wordCount += 1;
-    if (
-      wordCount >= HOOK_MIN_WORDS &&
-      SENTENCE_END_REGEX.test(token)
-    ) {
-      break;
-    }
-    if (wordCount >= HOOK_MAX_WORDS) {
-      break;
-    }
-  }
-  const baseSentence = normalizeHookText(selected.join(" "));
-  if (!baseSentence) return HOOK_DEFAULT_TEXT;
-  if (baseSentence.length <= HOOK_MAX_CHARACTERS) return baseSentence;
-  return `${baseSentence.slice(0, HOOK_MAX_CHARACTERS - 3).trim()}...`;
-};
-
-const coerceHookText = (value: string | null | undefined) => {
-  if (typeof value !== "string") return null;
-  const cleaned = normalizeHookText(value);
-  if (!cleaned) return null;
-  if (cleaned.length <= HOOK_MAX_CHARACTERS) return cleaned;
-  return `${cleaned.slice(0, HOOK_MAX_CHARACTERS - 3).trim()}...`;
-};
 
 type AnalysisEstimate = {
   minSeconds: number;
@@ -175,26 +134,10 @@ type AnalysisEstimate = {
 };
 
 type FaceApiModule = typeof import("face-api.js");
-type FaceDetectionResult = {
-  detection?: { box: { x: number; y: number; width: number; height: number } };
-  box?: { x: number; y: number; width: number; height: number };
-};
 type FaceCropRegion = {
   size: number;
   x: number;
   y: number;
-};
-type FaceCropRect = {
-  width: number;
-  height: number;
-  x: number;
-  y: number;
-};
-type NormalizedCropRect = {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
 };
 type PreloadScript = {
   version: 1;
@@ -701,18 +644,6 @@ export default function App() {
     }
   };
 
-  const imageDataToCanvas = (img: ImageData) => {
-    const canvas = document.createElement("canvas");
-    canvas.width = img.width;
-    canvas.height = img.height;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) {
-      throw new Error("Canvas context unavailable.");
-    }
-    ctx.putImageData(img, 0, 0);
-    return canvas;
-  };
-
   const grabFrame = (
     engine: CreativeEngineInstance,
     blockId: number,
@@ -794,118 +725,7 @@ export default function App() {
         }
       }
     }
-    if (!detections?.length) return [];
-    return detections.map((detection) => {
-      const box = "detection" in detection ? detection.detection.box : detection.box;
-      const { x, y, width, height } = box;
-      const x0 = x / canvas.width;
-      const x1 = (x + width) / canvas.width;
-      const y0 = y / canvas.height;
-      const y1 = (y + height) / canvas.height;
-      return {
-        cx: (x + width / 2) / canvas.width,
-        cy: (y + height / 2) / canvas.height,
-        x0,
-        x1,
-        y0,
-        y1,
-      };
-    });
-  };
-
-  const clampValue = (value: number, min: number, max: number) =>
-    Math.min(max, Math.max(min, value));
-
-  const normalizeCropRect = (
-    crop: FaceCropRect,
-    sourceWidth: number,
-    sourceHeight: number
-  ): NormalizedCropRect | null => {
-    const safeWidth = Math.max(1, sourceWidth);
-    const safeHeight = Math.max(1, sourceHeight);
-    let x = crop.x / safeWidth;
-    let y = crop.y / safeHeight;
-    let width = crop.width / safeWidth;
-    let height = crop.height / safeHeight;
-    if (
-      !Number.isFinite(x) ||
-      !Number.isFinite(y) ||
-      !Number.isFinite(width) ||
-      !Number.isFinite(height)
-    ) {
-      return null;
-    }
-    x = clampValue(x, 0, 1);
-    y = clampValue(y, 0, 1);
-    width = clampValue(width, 0, 1);
-    height = clampValue(height, 0, 1);
-    width = Math.max(0.01, Math.min(width, 1 - x));
-    height = Math.max(0.01, Math.min(height, 1 - y));
-    return { x, y, width, height };
-  };
-
-  const buildFacePixelCropRect = (
-    face: FaceBounds,
-    sourceWidth: number,
-    sourceHeight: number
-  ): FaceCropRect => {
-    const safeWidth = Math.max(1, sourceWidth);
-    const safeHeight = Math.max(1, sourceHeight);
-    const x0 = clampValue(face.x0, 0, 1) * safeWidth;
-    const x1 = clampValue(face.x1, 0, 1) * safeWidth;
-    const y0 = clampValue(face.y0, 0, 1) * safeHeight;
-    const y1 = clampValue(face.y1, 0, 1) * safeHeight;
-    const width = Math.max(1, x1 - x0);
-    const height = Math.max(1, y1 - y0);
-    const maxX = Math.max(0, safeWidth - width);
-    const maxY = Math.max(0, safeHeight - height);
-    return {
-      x: clampValue(x0, 0, maxX),
-      y: clampValue(y0, 0, maxY),
-      width,
-      height,
-    };
-  };
-
-  const scaleCropRect = (
-    rect: FaceCropRect,
-    scale: number,
-    maxWidth: number,
-    maxHeight: number,
-    extraWidth = 0,
-    extraHeight = 0,
-    topBias = 0.5
-  ): FaceCropRect => {
-    const safeScale =
-      Number.isFinite(scale) && scale > 0 ? scale : 1;
-    const safeExtraWidth =
-      Number.isFinite(extraWidth) ? extraWidth : 0;
-    const safeExtra =
-      Number.isFinite(extraHeight) ? extraHeight : 0;
-    const safeBias =
-      Number.isFinite(topBias) ? clampValue(topBias, 0, 1) : 0.5;
-    if (safeScale === 1 && safeExtra === 0 && safeExtraWidth === 0) {
-      return rect;
-    }
-    const width = Math.max(1, rect.width * safeScale);
-    const height = Math.max(
-      1,
-      rect.height * safeScale + safeExtra
-    );
-    const expandedWidth = Math.max(1, width + safeExtraWidth);
-    const centerX = rect.x + rect.width / 2;
-    const centerY = rect.y + rect.height / 2;
-    const biasShift = (safeBias - 0.5) * safeExtra;
-    const safeMaxWidth = Math.max(1, maxWidth);
-    const safeMaxHeight = Math.max(1, maxHeight);
-    const maxX = Math.max(0, safeMaxWidth - expandedWidth);
-    const maxY = Math.max(0, safeMaxHeight - height);
-    return {
-      width: expandedWidth,
-      height,
-      x: clampValue(centerX - expandedWidth / 2, 0, maxX),
-      y: clampValue(centerY - biasShift - height / 2, 0, maxY),
-    };
+    return parseFaceDetections(detections, canvas.width, canvas.height);
   };
 
   const applyRoundedCorners = (
@@ -5222,13 +5042,17 @@ export default function App() {
 
     const target = new BufferTarget();
     const output = new Output({
-      format: new WavOutputFormat(),
+      format: new Mp3OutputFormat(),
       target,
     });
 
     setProgress(30);
 
-    const conversion = await Conversion.init({ input, output });
+    const conversion = await Conversion.init({
+      input,
+      output,
+      video: { discard: true }, // Discard video track - we only need audio
+    });
 
     setProgress(50);
     await conversion.execute();
@@ -5238,7 +5062,7 @@ export default function App() {
     if (!buffer) {
       throw new Error("Failed to extract audio: no buffer produced");
     }
-    return new Blob([buffer], { type: "audio/wav" });
+    return new Blob([buffer], { type: "audio/mpeg" });
   };
 
   const setVideoTrackAutoManage = (
@@ -7117,13 +6941,15 @@ export default function App() {
           isExportingPreloadScript={isPreloadScriptExporting}
         />
 
-        {hasVideo && !showProcessingStage && (
-          <footer className="border-t">
-            <div className="container flex h-14 items-center justify-center text-xs text-muted-foreground">
-              Built with CE.SDK · React · Tailwind CSS
-            </div>
-          </footer>
-        )}
+        <footer className="mt-auto border-t">
+          <div className="container flex h-14 items-center justify-center gap-1 text-xs text-muted-foreground">
+            <span>Built by</span>
+            <a href="https://img.ly" target="_blank" rel="noopener noreferrer" className="underline hover:text-foreground">IMG.LY</a>
+            <span>·</span>
+            <span>Made with</span>
+            <a href="https://img.ly/creative-sdk" target="_blank" rel="noopener noreferrer" className="underline hover:text-foreground">CE.SDK</a>
+          </div>
+        </footer>
       </div>
     </ThemeProvider>
   );

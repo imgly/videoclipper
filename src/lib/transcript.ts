@@ -53,20 +53,72 @@ export type TranscriptWord = {
   speaker_id?: string | null;
 };
 
-const buildTextFromWords = (words?: ElevenLabsTranscriptWord[] | null) => {
+// Generic word-like interface for extraction
+type WordLike = {
+  text?: string;
+  word?: string;
+  start?: number;
+  end?: number;
+  type?: string;
+  speaker_id?: string;
+  speaker?: string;
+};
+
+type SegmentLike = {
+  text?: string;
+  words?: WordLike[];
+  speaker_id?: string;
+  speaker?: string;
+};
+
+type TranscriptPayload = {
+  text?: string;
+  transcript?: string;
+  combined_text?: string;
+  words?: WordLike[];
+  segments?: SegmentLike[];
+};
+
+// Configuration for different transcript providers
+type ExtractConfig = {
+  getText: (word: WordLike) => string | undefined;
+  shouldSkip?: (word: WordLike) => boolean;
+};
+
+const elevenLabsConfig: ExtractConfig = {
+  getText: (word) => word.text,
+  shouldSkip: (word) => word.type === "spacing" || word.type === "audio_event",
+};
+
+const openAIConfig: ExtractConfig = {
+  getText: (word) => word.word ?? word.text,
+};
+
+// Generic helper to build text from words
+const buildTextFromWords = (
+  words: WordLike[] | null | undefined,
+  config: ExtractConfig
+): string | null => {
   if (!Array.isArray(words)) return null;
   const text = words
-    .map((word) => word.text?.trim())
+    .map((word) => config.getText(word)?.trim())
     .filter((part): part is string => Boolean(part))
     .join(" ");
   return text || null;
 };
 
-const buildTextFromOpenAIWords = (words?: OpenAITranscriptWord[] | null) => {
-  if (!Array.isArray(words)) return null;
-  const text = words
-    .map((word) => (word.word ?? word.text)?.trim())
-    .filter((part): part is string => Boolean(part))
+// Generic helper to build text from segments
+const buildTextFromSegments = (
+  segments: SegmentLike[] | null | undefined,
+  config: ExtractConfig
+): string | null => {
+  if (!Array.isArray(segments)) return null;
+  const text = segments
+    .map(
+      (segment) =>
+        segment.text?.trim() ?? buildTextFromWords(segment.words, config) ?? ""
+    )
+    .filter(Boolean)
     .join(" ");
   return text || null;
 };
@@ -80,33 +132,6 @@ const normalizeSpeakerId = (value: unknown): string | null => {
     return String(value);
   }
   return null;
-};
-
-const buildTextFromSegments = (
-  segments?: ElevenLabsTranscriptSegment[] | null
-) => {
-  if (!Array.isArray(segments)) return null;
-  const text = segments
-    .map((segment) => segment.text?.trim() ?? buildTextFromWords(segment.words) ?? "")
-    .filter(Boolean)
-    .join(" ");
-  return text || null;
-};
-
-const buildTextFromOpenAISegments = (
-  segments?: OpenAITranscriptSegment[] | null
-) => {
-  if (!Array.isArray(segments)) return null;
-  const text = segments
-    .map(
-      (segment) =>
-        segment.text?.trim() ??
-        buildTextFromOpenAIWords(segment.words) ??
-        ""
-    )
-    .filter(Boolean)
-    .join(" ");
-  return text || null;
 };
 
 const shouldKeepFragment = (text: string) => {
@@ -146,15 +171,17 @@ const collectTextFragments = (
   }
 };
 
-export const pickTranscriptText = (
-  payload: ElevenLabsTranscriptResponse
+// Generic transcript text picker
+const pickTranscriptTextGeneric = (
+  payload: TranscriptPayload,
+  config: ExtractConfig
 ): string | null => {
   const candidates = [
     payload.text,
     payload.transcript,
     payload.combined_text,
-    buildTextFromSegments(payload.segments),
-    buildTextFromWords(payload.words),
+    buildTextFromSegments(payload.segments, config),
+    buildTextFromWords(payload.words, config),
   ]
     .map((candidate) => candidate?.trim())
     .filter((candidate): candidate is string => Boolean(candidate));
@@ -181,162 +208,84 @@ export const pickTranscriptText = (
   return fallbackText || null;
 };
 
+export const pickTranscriptText = (
+  payload: ElevenLabsTranscriptResponse
+): string | null => pickTranscriptTextGeneric(payload, elevenLabsConfig);
+
 export const pickOpenAITranscriptText = (
   payload: OpenAITranscriptResponse
-): string | null => {
-  const candidates = [
-    payload.text,
-    buildTextFromOpenAISegments(payload.segments),
-    buildTextFromOpenAIWords(payload.words),
-  ]
-    .map((candidate) => candidate?.trim())
-    .filter((candidate): candidate is string => Boolean(candidate));
+): string | null => pickTranscriptTextGeneric(payload, openAIConfig);
 
-  if (candidates.length) {
-    const seen = new Set<string>();
-    const ordered: string[] = [];
-    candidates.forEach((candidate) => {
-      if (!seen.has(candidate)) {
-        seen.add(candidate);
-        ordered.push(candidate);
-      }
-    });
-    const combined = ordered.join("\n\n").trim();
-    if (combined) {
-      return combined;
-    }
-  }
+// Generic word extraction
+const extractTranscriptWordsGeneric = (
+  payload: TranscriptPayload | null,
+  config: ExtractConfig
+): TranscriptWord[] => {
+  if (!payload) return [];
+  const directWords = Array.isArray(payload.words) ? payload.words : [];
+  const directEntries = directWords.map((word) => ({ word }));
+  const segmentEntries = Array.isArray(payload.segments)
+    ? payload.segments.flatMap((segment) =>
+        (segment.words ?? []).map((word) => ({
+          word,
+          segmentSpeaker: segment.speaker_id ?? segment.speaker,
+        }))
+      )
+    : [];
+  const combined = [...directEntries, ...segmentEntries];
 
-  const fallbackSeen = new Set<string>();
-  const fallbackOrdered: string[] = [];
-  collectTextFragments(payload, fallbackSeen, fallbackOrdered);
-  const fallbackText = fallbackOrdered.join("\n\n").trim();
-  return fallbackText || null;
+  const normalized = combined
+    .filter(
+      (entry): entry is { word: WordLike; segmentSpeaker?: unknown } =>
+        Boolean(entry?.word) && Boolean(config.getText(entry.word)?.trim())
+    )
+    .filter((entry) => !config.shouldSkip?.(entry.word))
+    .map((entry) => {
+      const text = config.getText(entry.word)?.trim();
+      if (!text) return null;
+      const start =
+        typeof entry.word.start === "number"
+          ? entry.word.start
+          : typeof entry.word.start === "string"
+          ? Number.parseFloat(entry.word.start)
+          : undefined;
+      const end =
+        typeof entry.word.end === "number"
+          ? entry.word.end
+          : typeof entry.word.end === "string"
+          ? Number.parseFloat(entry.word.end)
+          : undefined;
+      const safeStart = Number.isFinite(start)
+        ? (start as number)
+        : Number.isFinite(end)
+        ? (end as number) - 0.2
+        : 0;
+      const safeEnd = Number.isFinite(end)
+        ? (end as number)
+        : safeStart + 0.2;
+      const speakerId = normalizeSpeakerId(
+        entry.word.speaker_id ?? entry.word.speaker ?? entry.segmentSpeaker
+      );
+      const normalizedWord: TranscriptWord = {
+        text,
+        start: Math.max(0, safeStart),
+        end: Math.max(safeEnd, safeStart),
+        speaker_id: speakerId,
+      };
+      return normalizedWord;
+    })
+    .filter((word): word is TranscriptWord => Boolean(word));
+
+  return normalized.sort((a, b) => a.start - b.start);
 };
 
 export const extractTranscriptWords = (
   payload: ElevenLabsTranscriptResponse | null
-): TranscriptWord[] => {
-  if (!payload) return [];
-  const directWords = Array.isArray(payload.words) ? payload.words : [];
-  const directEntries = directWords.map((word) => ({ word }));
-  const segmentEntries = Array.isArray(payload.segments)
-    ? payload.segments.flatMap((segment) =>
-        (segment.words ?? []).map((word) => ({
-          word,
-          segmentSpeaker: segment.speaker_id ?? segment.speaker,
-        }))
-      )
-    : [];
-  const combined = [...directEntries, ...segmentEntries];
-
-  const normalized = combined
-    .filter(
-      (entry): entry is { word: ElevenLabsTranscriptWord; segmentSpeaker?: unknown } =>
-        Boolean(entry?.word) &&
-        Boolean(entry.word.text?.trim()) &&
-        entry.word.type !== "spacing" &&
-        entry.word.type !== "audio_event"
-    )
-    .map((entry) => {
-      const text = entry.word.text?.trim();
-      if (!text) return null;
-      const start =
-        typeof entry.word.start === "number"
-          ? entry.word.start
-          : typeof entry.word.start === "string"
-          ? Number.parseFloat(entry.word.start)
-          : undefined;
-      const end =
-        typeof entry.word.end === "number"
-          ? entry.word.end
-          : typeof entry.word.end === "string"
-          ? Number.parseFloat(entry.word.end)
-          : undefined;
-      const safeStart = Number.isFinite(start)
-        ? (start as number)
-        : Number.isFinite(end)
-        ? (end as number) - 0.2
-        : 0;
-      const safeEnd = Number.isFinite(end)
-        ? (end as number)
-        : safeStart + 0.2;
-      const speakerId = normalizeSpeakerId(
-        entry.word.speaker_id ?? entry.word.speaker ?? entry.segmentSpeaker
-      );
-      const normalizedWord: TranscriptWord = {
-        text,
-        start: Math.max(0, safeStart),
-        end: Math.max(safeEnd, safeStart),
-        speaker_id: speakerId,
-      };
-      return normalizedWord;
-    })
-    .filter((word): word is TranscriptWord => Boolean(word));
-
-  return normalized.sort((a, b) => a.start - b.start);
-};
+): TranscriptWord[] => extractTranscriptWordsGeneric(payload, elevenLabsConfig);
 
 export const extractOpenAITranscriptWords = (
   payload: OpenAITranscriptResponse | null
-): TranscriptWord[] => {
-  if (!payload) return [];
-  const directWords = Array.isArray(payload.words) ? payload.words : [];
-  const directEntries = directWords.map((word) => ({ word }));
-  const segmentEntries = Array.isArray(payload.segments)
-    ? payload.segments.flatMap((segment) =>
-        (segment.words ?? []).map((word) => ({
-          word,
-          segmentSpeaker: segment.speaker_id ?? segment.speaker,
-        }))
-      )
-    : [];
-  const combined = [...directEntries, ...segmentEntries];
-
-  const normalized = combined
-    .filter(
-      (entry): entry is { word: OpenAITranscriptWord; segmentSpeaker?: unknown } =>
-        Boolean(entry?.word) &&
-        Boolean((entry.word.word ?? entry.word.text)?.trim())
-    )
-    .map((entry) => {
-      const text = (entry.word.word ?? entry.word.text)?.trim();
-      if (!text) return null;
-      const start =
-        typeof entry.word.start === "number"
-          ? entry.word.start
-          : typeof entry.word.start === "string"
-          ? Number.parseFloat(entry.word.start)
-          : undefined;
-      const end =
-        typeof entry.word.end === "number"
-          ? entry.word.end
-          : typeof entry.word.end === "string"
-          ? Number.parseFloat(entry.word.end)
-          : undefined;
-      const safeStart = Number.isFinite(start)
-        ? (start as number)
-        : Number.isFinite(end)
-        ? (end as number) - 0.2
-        : 0;
-      const safeEnd = Number.isFinite(end)
-        ? (end as number)
-        : safeStart + 0.2;
-      const speakerId = normalizeSpeakerId(
-        entry.word.speaker_id ?? entry.word.speaker ?? entry.segmentSpeaker
-      );
-      const normalizedWord: TranscriptWord = {
-        text,
-        start: Math.max(0, safeStart),
-        end: Math.max(safeEnd, safeStart),
-        speaker_id: speakerId,
-      };
-      return normalizedWord;
-    })
-    .filter((word): word is TranscriptWord => Boolean(word));
-
-  return normalized.sort((a, b) => a.start - b.start);
-};
+): TranscriptWord[] => extractTranscriptWordsGeneric(payload, openAIConfig);
 
 export const buildTranscriptWordsFromText = (
   text?: string | null,

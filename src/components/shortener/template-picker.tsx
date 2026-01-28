@@ -1,5 +1,5 @@
-import { cn } from "@/lib/utils";
 import type { SpeakerTemplateId, SpeakerTemplateOption } from "@/features/shortener/types";
+import OptionPicker from "./option-picker";
 
 type TemplatePickerProps = {
   options: SpeakerTemplateOption[];
@@ -76,6 +76,7 @@ const PreviewOutline = ({
     );
   }
 
+  // Default: stacked
   return (
     <div className="relative h-12 w-12">
       <div className={`absolute left-1 top-1 right-1 h-6 ${outline}`} />
@@ -95,36 +96,17 @@ const TemplatePicker = ({
   disabled = false,
   className,
 }: TemplatePickerProps) => (
-  <div
-    className={cn("flex flex-wrap gap-3", className)}
-    role="group"
-    aria-label="Template"
-  >
-    {options.map((option) => {
-      const isActive = value === option.id;
-      return (
-        <button
-          key={option.id}
-          type="button"
-          onClick={() => onChange(option.id)}
-          className={cn(
-            "flex w-24 flex-col items-center gap-2 rounded-xl border px-3 py-3 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
-            isActive
-              ? "border-primary text-foreground"
-              : "border-muted text-muted-foreground hover:border-muted-foreground/60",
-            disabled && "pointer-events-none opacity-50"
-          )}
-          aria-pressed={isActive}
-          disabled={disabled}
-        >
-          <div className="flex h-12 w-12 items-center justify-center">
-            <PreviewOutline templateId={option.id} isActive={isActive} />
-          </div>
-          <span>{option.label}</span>
-        </button>
-      );
-    })}
-  </div>
+  <OptionPicker
+    options={options}
+    value={value}
+    onChange={onChange}
+    renderPreview={(id, isActive) => (
+      <PreviewOutline templateId={id} isActive={isActive} />
+    )}
+    disabled={disabled}
+    className={className}
+    ariaLabel="Template"
+  />
 );
 
 export default TemplatePicker;

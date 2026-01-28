@@ -22,12 +22,14 @@ An AI-powered video shortener that:
 
 ### Why Client-Side Video Editing?
 
-| Traditional Cloud Processing | CE.SDK Client-Side Approach |
-|------------------------------|------------------------------|
-| Upload video → wait → queue → process → download | Edit directly in browser |
-| 2-3x longer processing time | Near-instant preview |
-| Re-generate entire video for changes | Non-destructive: change aspect ratio/style anytime |
-| Server costs scale with usage | Processing happens on user's device |
+CE.SDK's CreativeEngine runs entirely in the browser via WebAssembly. This means all the heavy lifting — video decoding, timeline manipulation, effects rendering, and preview generation — happens directly on the user's device rather than on remote servers.
+
+**Why this matters:**
+
+- **2-3x faster turnaround** — No upload/download overhead, no queue waiting. Edits preview instantly.
+- **Non-destructive editing** — Changed your mind about the aspect ratio? Want a different template? Just switch it. No need to re-process the entire video like with cloud services.
+- **Lower infrastructure costs** — Processing happens on the user's device, not your servers. Your costs don't scale with video length or user count.
+- **Better user experience** — Real-time preview means users see exactly what they'll get, instantly.
 
 ### Built in a Day
 This entire application was built in a single day using:
@@ -48,57 +50,7 @@ This entire application was built in a single day using:
 ### High-Level Flow
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              USER UPLOADS VIDEO                              │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                      │
-                                      ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│  1. LOAD VIDEO INTO CE.SDK                                                   │
-│     └── Get duration, dimensions, create timeline                            │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                      │
-                                      ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│  2. EXTRACT AUDIO                                                            │
-│     └── CE.SDK exports audio track → Blob                                    │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                      │
-                                      ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│  3. TRANSCRIBE AUDIO                                          [ElevenLabs]  │
-│     └── Word-level timestamps + speaker diarization                          │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                      │
-                                      ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│  4. AI HIGHLIGHT DETECTION                                       [Gemini]   │
-│     └── Identify compelling segments, generate titles/descriptions          │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                      │
-                                      ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│  5. FACE DETECTION & SPEAKER TRACKING                        [face-api.js]  │
-│     └── Detect faces, cluster by similarity, build speaker candidates       │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                      │
-                                      ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│  6. USER CONFIRMS SPEAKERS                              [Interactive Step]  │
-│     └── Quiz-style UI: "Who is this speaker?" with face thumbnails          │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                      │
-                                      ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│  7. APPLY EDITS IN CE.SDK                                                    │
-│     └── Trim timeline, apply templates, position speakers, add captions     │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                      │
-                                      ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│  8. PREVIEW & EXPORT                                                         │
-│     └── Real-time preview in browser, export final video                     │
-└─────────────────────────────────────────────────────────────────────────────┘
+Illustration // FIGMA 
 ```
 
 ### Ingredients: API Keys Required
@@ -383,40 +335,16 @@ async function generateSpeakerThumbnail(
 
 ### Why Semi-Automatic?
 
-We deliberately chose a **human-in-the-loop** approach for speaker identification. Here's why:
+We chose a **human-in-the-loop** approach: a quick 5-second confirmation beats re-processing a 10-minute video when auto-detection fails. The quiz-style "Who is this speaker?" interaction also turns a technical step into an engaging moment.
 
-| Fully Automatic | Semi-Automatic (Our Approach) |
-|-----------------|-------------------------------|
-| Can misidentify speakers with similar features | User confirms identity = 100% accuracy |
-| Silent failures lead to wrong layouts | Errors caught before processing |
-| Black box — user doesn't understand what happened | Transparent — user sees detected faces |
-| Frustrating when wrong | **Engaging quiz-style interaction** |
+### How It Works
 
-The key insight: **a quick 5-second confirmation is better than re-processing a 10-minute video**. Plus, the quiz-style "Who is this speaker?" interaction turns a technical step into an engaging moment.
+1. **Sample frames** throughout the video
+2. **Detect & cluster faces** using face-api.js (browser-based, no server needed)
+3. **User confirms** speaker identities via thumbnails
+4. **Correlate with transcript** diarization to map speakers → face locations
 
-### The User Experience
-
-1. System detects faces and clusters them by similarity
-2. User sees thumbnails of detected speakers
-3. Quick confirmation: "Is this correct?" or drag-to-reorder
-4. Processing continues with verified speaker identities
-
-### Libraries Used
-
-- **face-api.js**: TensorFlow.js-based face detection and recognition
-- Runs entirely in the browser (no server processing needed)
-- Provides face landmarks, descriptors for matching, and bounding boxes
-
-### How It Works (Technical)
-
-1. **Sample frames** at regular intervals throughout the video
-2. **Detect faces** in each frame using face-api.js
-3. **Cluster faces** by similarity to identify unique speakers
-4. **Present to user** for confirmation/correction
-5. **Correlate with transcript** speaker IDs from diarization
-6. **Build speaker snippets**: time ranges + face coordinates for each speaker
-
-The result is a verified data structure mapping each speaker to their face location at any point in the video, enabling dynamic cropping and picture-in-picture layouts.
+The result: verified speaker-to-face mapping enabling dynamic cropping and picture-in-picture layouts.
 
 ---
 
@@ -428,16 +356,6 @@ When a video has multiple speakers, we can create engaging layouts that show:
 - The **active speaker** prominently
 - **Other speakers** in smaller picture-in-picture views
 - **Dynamic switching** as the conversation flows
-
-### Template Layouts
-
-| Template | Description |
-|----------|-------------|
-| **Solo** | Single speaker, zoomed/cropped to face |
-| **Sidecar** | Active speaker large, other speaker in sidebar |
-| **Stacked** | Active speaker top, other speaker bottom |
-| **Overlay** | Active speaker full, small PiP bubble |
-| **Multi/Grid** | Equal-sized grid of all speakers |
 
 ### Creating Picture-in-Picture with CE.SDK
 
@@ -602,11 +520,17 @@ For longer videos, consider:
 
 ### Ideas for Extension
 
-- **Auto-captions**: Burn in animated subtitles
+- **Caption style controls**: Custom fonts, animations, and positioning for subtitles
 - **B-roll insertion**: Automatically add relevant stock footage
 - **Music & sound effects**: AI-selected background audio
 - **Brand templates**: Custom overlays, intros, outros
 - **Batch processing**: Process multiple videos in sequence
+
+### Taking It Server-Side
+
+While client-side processing offers speed and cost advantages, it has limitations — large files can strain browser memory, and users must keep the tab open during export. For a more robust solution, consider a hybrid approach: upload videos in the background while users continue editing, then offload final rendering to a server.
+
+CE.SDK's multi-platform architecture makes this straightforward — the same code runs server-side too. If you need batch processing, background jobs, or want to offload rendering from user devices, check out the [CE.SDK Renderer for creative automation](https://img.ly/blog/ce-sdk-renderer-creative-automation/). It enables high-throughput video generation on your own infrastructure — same API, different runtime.
 
 ### Resources
 
@@ -618,4 +542,4 @@ For longer videos, consider:
 
 ---
 
-*Built with CE.SDK by IMG.LY — the creative engine for browser-based video editing.*
+*Made by [IMG.LY](https://img.ly) with [CE.SDK](https://img.ly/creative-sdk) — the creative engine for browser-based design and video editing.*

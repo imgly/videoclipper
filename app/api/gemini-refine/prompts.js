@@ -5,10 +5,16 @@ Rules that always apply:
 2. When a section is repeated multiple times, keep only the cleanest, most fluent take.
 3. You may delete entire words or sentences, but NEVER rewrite, paraphrase, or invent new words. The remaining tokens must exactly match the transcript (case and punctuation changes are fine).
 4. Keep the original chronological order and never splice content out of sequence.
-5. Prefer complete sentences and coherent thought units; avoid starting or ending mid-sentence and avoid tiny fragments. Do NOT stitch partial sentences together; if a sentence must be cut, drop it entirely unless there's no better option.
-6. Return trimmed_text only (no timestamps, indices, or word lists).
-7. Maintain continuity: if removing a section would make the story confusing, keep the necessary context.
-8. Create a short social-media hook summarizing the trimmed clip. Hooks CAN be newly written and do not have to appear in the transcript. Keep them 6-12 words, punchy, and specific to the clip's content. Do not mention trimming, editing, or the transcript.
+5. THE OPENING IS CRITICAL - A viewer must understand the clip without any prior context. Before finalizing, ask yourself: "If someone started watching here, would they understand what's being discussed?" Bad openings to AVOID:
+   - Starting with connectors/conjunctions: "And then...", "But the...", "So we..."
+   - Starting with pronouns without antecedent: "It was...", "They said...", "That's why..."
+   - Starting mid-thought: "...the everyday jobs", "...strong communication skills", "...why I was thinking"
+   - Starting with a response to an unheard question: "Yeah, so...", "I guess the part where..."
+   Instead, find a sentence that establishes context - typically one that introduces a topic, names a subject, or poses a question.
+6. NEVER end mid-sentence. The last word must complete a thought. Do NOT stitch partial sentences together; if a sentence must be cut, drop it entirely.
+7. Return trimmed_text only (no timestamps, indices, or word lists).
+8. Maintain continuity: if removing a section would make the story confusing, keep the necessary context.
+9. Create a short social-media hook summarizing the trimmed clip. Hooks CAN be newly written and do not have to appear in the transcript. Keep them 6-12 words, punchy, and specific to the clip's content. Do not mention trimming, editing, or the transcript.
 
 If a transcript file is attached, it contains TRANSCRIPT_TEXT (plain text) that you must load before proceeding.`;
 
@@ -46,11 +52,11 @@ export const SHORTENING_MODE_INSTRUCTIONS = {
   disfluency:
     "Focus exclusively on cleaning up vocal disfluencies, hesitations, and filler phrases. Keep every substantive sentence unless it is entirely filler. The final runtime should closely match the original aside from the removed filler tokens.",
   thirty_seconds:
-    "Target a finished runtime of 28-32 seconds. Besides removing disfluencies, aggressively remove whole sentences or tangents that are redundant, off-topic, or low-impact while preserving the overall narrative arc. Avoid finishing under ~26 seconds unless the source itself is shorter. If you undershoot, add back the next most relevant sentence to reach the target range.",
+    "Target a finished runtime of 28-32 seconds. Besides removing disfluencies, aggressively remove whole sentences or tangents that are redundant, off-topic, or low-impact while preserving the overall narrative arc. Avoid finishing under ~26 seconds unless the source itself is shorter. If you undershoot, add back the next most relevant sentence to reach the target range. PRIORITY: Find a strong opening that gives viewers context. If the most interesting content starts mid-conversation, include the preceding question or topic introduction even if it adds a few seconds. A 35-second clip with a clear opening beats a 30-second clip that confuses viewers.",
   sixty_seconds:
-    "Target a finished runtime of 55-65 seconds. Besides removing disfluencies, aggressively remove whole sentences or tangents that are redundant, off-topic, or low-impact while preserving the overall narrative arc. Avoid finishing under ~50 seconds unless the source itself is shorter. If you undershoot, add back the next most relevant sentence to reach the target range.",
+    "Target a finished runtime of 55-65 seconds. Besides removing disfluencies, aggressively remove whole sentences or tangents that are redundant, off-topic, or low-impact while preserving the overall narrative arc. Avoid finishing under ~50 seconds unless the source itself is shorter. If you undershoot, add back the next most relevant sentence to reach the target range. PRIORITY: Find a strong opening that gives viewers context. If the most interesting content starts mid-conversation, include the preceding question or topic introduction even if it adds a few seconds. A 70-second clip with a clear opening beats a 60-second clip that confuses viewers.",
   summary:
-    "Create a summary edit that captures all important talking points and the essence of the video. The runtime can be longer (often a few minutes) and should prioritize completeness over brevity. Remove disfluencies and low-value tangents while preserving a coherent narrative arc.",
+    "Create a summary edit that captures all important talking points and the essence of the video. The runtime can be longer (often a few minutes) and should prioritize completeness over brevity. Remove disfluencies and low-value tangents while preserving a coherent narrative arc. Ensure each section begins with enough context for viewers to follow.",
   blooper:
     "Create a blooper/comedy reel by identifying and keeping the funniest, most awkward, or entertaining moments from the video. Focus on: bloopers and mistakes, funny conversations and banter, awkward moments and reactions, unexpected jokes or comedic timing, amusing tangents or derailments, and any genuinely humorous content. KEEP the natural imperfections, stammers, and verbal stumbles that make these moments funny - do NOT clean up disfluencies if they add to the comedic effect. Remove only the boring or serious segments between funny moments. The final runtime should prioritize humor and entertainment value over coherence. Target a punchy, energetic vibe that maximizes laughs.",
 };

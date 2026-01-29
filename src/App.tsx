@@ -5262,7 +5262,14 @@ export default function App() {
         if (previous) {
           const prevEnd = previous.end ?? previous.start ?? 0;
           const gap = (word.start ?? 0) - prevEnd;
-          if (gap >= CAPTION_SENTENCE_GAP && currentSentence.length) {
+          const speakerChanged =
+            previous.speaker_id != null &&
+            word.speaker_id != null &&
+            previous.speaker_id !== word.speaker_id;
+          if (
+            (gap >= CAPTION_SENTENCE_GAP || speakerChanged) &&
+            currentSentence.length
+          ) {
             sentences.push(currentSentence);
             currentSentence = [];
           }

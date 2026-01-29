@@ -192,6 +192,9 @@ CRITERIA FOR SELECTION:
 - Complete thoughts (don't cut mid-explanation)
 - Emotional peaks (humor, insight, controversy)
 - Standalone value (makes sense without context)
+
+Before finalizing each segment, ask: "If someone started watching here,
+would they understand what's being discussed?"
 ```
 
 ### Mapping Back to Timestamps

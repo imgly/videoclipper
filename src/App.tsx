@@ -112,7 +112,7 @@ const FACE_CROP_CORNER_RADIUS_RATIO = 0.18;
 const FACE_CROP_CORNER_RADIUS_MIN = 16;
 const FACE_CROP_CORNER_RADIUS_MAX = 72;
 const FACE_CROP_CORNER_RADIUS_RATIO_ACTIVE = 0.08; // Less rounded for active speaker
-const FACE_CROP_CORNER_RADIUS_RATIO_THUMB = 0.5; // Circular thumbnails
+const FACE_CROP_CORNER_RADIUS_RATIO_THUMB = 0.08; // Rectangular thumbnails (same as active)
 const FACE_OVERLAY_COLORS = [
   { r: 0.95, g: 0.32, b: 0.32, a: 0.22 },
   { r: 0.23, g: 0.64, b: 0.95, a: 0.22 },
@@ -1388,28 +1388,71 @@ export default function App() {
     }
 
     if (templateId === "multi") {
-      const thumbsHeight = sceneHeight * 0.26;
-      const thumbGap = gap * 0.5; // Reduced gap to move thumbnails up
-      const active: LayoutSlot = {
-        x: margin,
-        y: margin,
-        width: Math.max(0, sceneWidth - margin * 2),
-        height: Math.max(
-          0,
-          sceneHeight - margin * 2 - thumbGap - thumbsHeight
-        ),
-      };
-      const thumbsArea: LayoutSlot = {
-        x: margin,
-        y: active.y + active.height + thumbGap,
-        width: Math.max(0, sceneWidth - margin * 2),
-        height: thumbsHeight,
-      };
-      const columns = Math.min(thumbCount, 3);
-      return {
-        active,
-        thumbs: buildGridSlots(thumbsArea, thumbCount, columns || 1, gap * 0.6),
-      };
+      const aspectRatio = sceneWidth / sceneHeight;
+      const isVertical = aspectRatio < 1; // 9:16 or similar
+
+      if (isVertical) {
+        // 9:16 layout: active speaker on top, thumbs below, empty space at bottom for captions
+        const captionAreaHeight = sceneHeight * 0.18; // Reserve bottom 18% for captions
+        const availableHeight = sceneHeight - margin * 2 - captionAreaHeight;
+        const thumbsHeight = Math.min(availableHeight * 0.28, sceneWidth * 0.5); // Rectangular thumbs
+        const activeHeight = availableHeight - margin - thumbsHeight; // margin between active and thumbs
+        const active: LayoutSlot = {
+          x: margin,
+          y: margin,
+          width: Math.max(0, sceneWidth - margin * 2),
+          height: Math.max(0, activeHeight),
+        };
+        const thumbsArea: LayoutSlot = {
+          x: margin,
+          y: active.y + active.height + margin, // Same margin as sides
+          width: Math.max(0, sceneWidth - margin * 2),
+          height: thumbsHeight,
+        };
+        const columns = Math.min(thumbCount, 3);
+        return {
+          active,
+          thumbs: buildGridSlots(thumbsArea, thumbCount, columns || 1, margin),
+        };
+      } else {
+        // 16:9 layout: active speaker large on left (~70%), thumbs stacked on right (~30%)
+        const thumbColumnWidth = sceneWidth * 0.28;
+        const activeWidth = sceneWidth - margin * 3 - thumbColumnWidth; // margin left, between, right
+        const activeHeight = sceneHeight - margin * 2;
+
+        const active: LayoutSlot = {
+          x: margin,
+          y: margin,
+          width: Math.max(0, activeWidth),
+          height: Math.max(0, activeHeight),
+        };
+
+        // Thumbs stacked vertically on the right
+        const thumbsArea: LayoutSlot = {
+          x: margin + activeWidth + margin,
+          y: margin,
+          width: thumbColumnWidth,
+          height: activeHeight,
+        };
+
+        // Stack thumbs vertically with consistent margins
+        const rows = Math.max(1, thumbCount);
+        const thumbHeight = (thumbsArea.height - margin * (rows - 1)) / rows;
+        const thumbSlots: LayoutSlot[] = [];
+        for (let i = 0; i < thumbCount; i++) {
+          thumbSlots.push({
+            x: thumbsArea.x,
+            y: thumbsArea.y + i * (thumbHeight + margin),
+            width: thumbsArea.width,
+            height: thumbHeight,
+          });
+        }
+
+        return {
+          active,
+          thumbs: thumbSlots,
+        };
+      }
     }
 
     if (templateId === "sidecar") {
@@ -2793,7 +2836,19 @@ export default function App() {
               }
             }
 
-            engine.block.appendChild(trackId, clip);
+            // Validate track still exists before appending (handles race conditions on aspect ratio change)
+            if (!engine.block.isValid(trackId)) {
+              console.warn("Template track no longer valid, skipping clip");
+              engine.block.destroy(clip);
+              continue;
+            }
+            try {
+              engine.block.appendChild(trackId, clip);
+            } catch (appendError) {
+              console.warn("Failed to append clip to template track", appendError);
+              engine.block.destroy(clip);
+              continue;
+            }
             templateClipIdsRef.current.push(clip);
             if (createdClips === 0) {
               setBaseClipVisibility(engine, false);
@@ -2986,7 +3041,19 @@ export default function App() {
             }
           }
 
-          engine.block.appendChild(trackId, clip);
+          // Validate track still exists before appending (handles race conditions on aspect ratio change)
+          if (!engine.block.isValid(trackId)) {
+            console.warn("Template track no longer valid, skipping clip");
+            engine.block.destroy(clip);
+            continue;
+          }
+          try {
+            engine.block.appendChild(trackId, clip);
+          } catch (appendError) {
+            console.warn("Failed to append clip to template track", appendError);
+            engine.block.destroy(clip);
+            continue;
+          }
           templateClipIdsRef.current.push(clip);
           if (createdClips === 0) {
             setBaseClipVisibility(engine, false);
@@ -5162,7 +5229,21 @@ export default function App() {
       normalized: normalizeWordText(word.text),
       speaker_id: word.speaker_id ?? null,
     }));
+
+    // Use the first trimmed word's timestamp to find approximate starting position
+    // This prevents matching common words like "if", "i", "you" from the wrong part of the transcript
+    const firstWordTime = trimmedWords[0]?.start ?? 0;
+    const timeTolerance = 2.0; // seconds
     let searchIndex = 0;
+
+    // Find source index closest to the first trimmed word's timestamp
+    for (let i = 0; i < normalizedSource.length; i += 1) {
+      if (normalizedSource[i].start >= firstWordTime - timeTolerance) {
+        searchIndex = Math.max(0, i - 5); // Start a bit before for safety
+        break;
+      }
+    }
+
     const mapped: TranscriptWord[] = [];
 
     trimmedWords.forEach((word) => {

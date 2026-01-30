@@ -23,7 +23,18 @@ export const buildKeepRangesFromWords = (
     normalized: normalizeWordText(word.text),
   }));
 
+  // Use the first refined word's timestamp to find approximate starting position
+  // This prevents matching common words like "if", "i", "you" from the wrong part of the transcript
+  const firstWordTime = refinedWords[0]?.start ?? 0;
+  const timeTolerance = 2.0; // seconds
   let searchIndex = 0;
+
+  for (let i = 0; i < normalizedSource.length; i += 1) {
+    if (normalizedSource[i].start >= firstWordTime - timeTolerance) {
+      searchIndex = Math.max(0, i - 5); // Start a bit before for safety
+      break;
+    }
+  }
   let lastMatchedIndex = -2;
   let currentRange: TimeRange | null = null;
   const ranges: TimeRange[] = [];

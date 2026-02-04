@@ -363,12 +363,15 @@ engine.block.setContentFillMode(pipBlock, 'Cover');
 
 ### Key Technique: Muting Duplicate Audio
 
-When duplicating video blocks for multi-speaker layouts, each copy has its own audio track. We must mute all but one:
+When duplicating video blocks for multi-speaker layouts, each copy has its own audio track. We must mute all but one. The `setMuted` API operates on the video fill, not the block itself:
 
 ```typescript
-// For each speaker slot after the first
+// For each speaker slot after the first, mute the video fill
 if (slotIndex > 0) {
-  engine.block.setMuted(duplicatedBlock, true);
+  const videoFill = engine.block.getFill(duplicatedBlock);
+  if (videoFill) {
+    engine.block.setMuted(videoFill, true);
+  }
 }
 ```
 

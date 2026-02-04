@@ -2693,9 +2693,9 @@ export default function App() {
 
             // Mute audio on all clips except the first slot (active speaker)
             // to prevent multiple audio streams playing simultaneously
-            if (slotIndex > 0) {
+            if (slotIndex > 0 && clipFill) {
               try {
-                engine.block.setMuted(clip, true);
+                engine.block.setMuted(clipFill, true);
               } catch (muteError) {
                 console.warn("Failed to mute template clip audio", muteError);
               }
